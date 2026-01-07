@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'vigias-ingest'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['ingest:8080']
+
+  - job_name: 'vigias-inference'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['inference:8007']

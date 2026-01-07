@@ -1,0 +1,170 @@
+# VIGIAS-IA Alerting Rules
+groups:
+  - name: vigias_cameras
+    interval: 30s
+    rules:
+      # Camera offline alert
+      - alert: CameraOffline
+        expr: vigias_cameras_by_status{status="OFFLINE"} > 0
+        for: 5m
+        labels:
+          severity: high
+          component: camera
+        annotations:
+          summary: "Camera(s) offline"
+          description: "{{$value}} camera(s) are currently offline for more than 5 minutes"
+
+      # Camera in error state
+      - alert: CameraError
+        expr: vigias_cameras_by_status{status="ERROR"} > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: camera
+        annotations:
+          summary: "Camera(s) in error state"
+          description: "{{$value}} camera(s) are in ERROR state"
+
+      # Low FPS alert
+      - alert: LowCameraFPS
+        expr: vigias_camera_fps < 5
+        for: 3m
+        labels:
+          severity: warning
+          component: camera
+        annotations:
+          summary: "Low camera FPS"
+          description: "Camera {{$labels.camera_name}} FPS is {{$value}}, below threshold of 5"
+
+      # High CPU usage per camera
+      - alert: HighCameraCPU
+        expr: vigias_camera_cpu_percent > 90
+        for: 5m
+        labels:
+          severity: warning
+          component: camera
+        annotations:
+          summary: "High CPU usage on camera"
+          description: "Camera {{$labels.camera_name}} CPU usage is {{$value}}%"
+
+      # High memory usage per camera
+      - alert: HighCameraMemory
+        expr: vigias_camera_memory_mb > 500
+        for: 5m
+        labels:
+          severity: warning
+          component: camera
+        annotations:
+          summary: "High memory usage on camera"
+          description: "Camera {{$labels.camera_name}} memory usage is {{$value}}MB"
+
+  - name: vigias_events
+    interval: 30s
+    rules:
+      # High critical event rate
+      - alert: HighCriticalEventRate
+        expr: rate(vigias_events_created_total{severity="CRITICAL"}[5m]) > 0.5
+        for: 2m
+        labels:
+          severity: critical
+          component: events
+        annotations:
+          summary: "High rate of critical events"
+          description: "Critical events are being created at {{$value}} events/second"
+
+      # Spike in security events
+      - alert: SecurityEventSpike
+        expr: rate(vigias_events_created_total{event_type="intrusion"}[5m]) > 0.1
+        for: 1m
+        labels:
+          severity: high
+          component: security
+        annotations:
+          summary: "Intrusion event spike detected"
+          description: "Intrusion events spiked to {{$value}} events/second"
+
+  - name: vigias_notifications
+    interval: 30s
+    rules:
+      # High notification failure rate
+      - alert: HighNotificationFailureRate
+        expr: rate(vigias_notifications_sent_total{status="FAILED"}[5m]) / rate(vigias_notifications_sent_total[5m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: notifications
+        annotations:
+          summary: "High notification failure rate"
+          description: "{{$value | humanizePercentage}} of notifications are failing"
+
+      # Slow notification delivery
+      - alert: SlowNotificationDelivery
+        expr: histogram_quantile(0.95, sum(rate(vigias_notification_delivery_duration_seconds_bucket[5m])) by (le, channel_type)) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: notifications
+        annotations:
+          summary: "Slow notification delivery"
+          description: "{{$labels.channel_type}} p95 delivery time is {{$value}}s"
+
+  - name: vigias_api
+    interval: 30s
+    rules:
+      # High API error rate
+      - alert: HighAPIErrorRate
+        expr: rate(vigias_api_requests_total{status_code=~"5.."}[5m]) / rate(vigias_api_requests_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: high
+          component: api
+        annotations:
+          summary: "High API error rate"
+          description: "{{$value | humanizePercentage}} of API requests are failing with 5xx errors"
+
+      # Slow API responses
+      - alert: SlowAPIResponses
+        expr: histogram_quantile(0.95, sum(rate(vigias_api_request_duration_seconds_bucket[5m])) by (le, endpoint)) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "Slow API responses"
+          description: "{{$labels.endpoint}} p95 latency is {{$value}}s"
+
+  - name: vigias_system
+    interval: 30s
+    rules:
+      # NATS disconnected
+      - alert: NATSDisconnected
+        expr: vigias_nats_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "NATS connection lost"
+          description: "Router is disconnected from NATS message broker"
+
+      # Redis disconnected
+      - alert: RedisDisconnected
+        expr: vigias_redis_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Redis connection lost"
+          description: "Router is disconnected from Redis cache"
+
+      # Database connection pool exhausted
+      - alert: DatabaseConnectionPoolExhausted
+        expr: vigias_db_connections_active >= 90
+        for: 2m
+        labels:
+          severity: high
+          component: database
+        annotations:
+          summary: "Database connection pool near limit"
+          description: "{{$value}} active database connections (limit: 100)"

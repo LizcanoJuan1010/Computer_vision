@@ -1,0 +1,116 @@
+{
+  "dashboard": {
+    "title": "VIGIAS-IA System Overview",
+    "tags": ["vigias", "overview"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "API Request Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(vigias_api_requests_total[5m])) by (endpoint)",
+            "legendFormat": "{{endpoint}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "title": "API Request Latency (p95)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(vigias_api_request_duration_seconds_bucket[5m])) by (le, endpoint))",
+            "legendFormat": "{{endpoint}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "title": "Events Created (by Type)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(vigias_events_created_total[5m])) by (event_type)",
+            "legendFormat": "{{event_type}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "title": "Events by Severity",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "sum(vigias_events_created_total) by (severity)",
+            "legendFormat": "{{severity}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "title": "Cameras by Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "vigias_cameras_by_status",
+            "legendFormat": "{{status}}"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 16}
+      },
+      {
+        "title": "Active Notifications (Last 5min)",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(vigias_notifications_sent_total[5m]))",
+            "legendFormat": "Notifications/sec"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 16}
+      },
+      {
+        "title": "NATS Connection",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "vigias_nats_connected",
+            "legendFormat": "NATS"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 16}
+      },
+      {
+        "title": "Redis Connection",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "vigias_redis_connected",
+            "legendFormat": "Redis"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 16}
+      },
+      {
+        "title": "Notification Delivery Time (p50, p95, p99)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, sum(rate(vigias_notification_delivery_duration_seconds_bucket[5m])) by (le, channel_type))",
+            "legendFormat": "{{channel_type}} p50"
+          },
+          {
+            "expr": "histogram_quantile(0.95, sum(rate(vigias_notification_delivery_duration_seconds_bucket[5m])) by (le, channel_type))",
+            "legendFormat": "{{channel_type}} p95"
+          },
+          {
+            "expr": "histogram_quantile(0.99, sum(rate(vigias_notification_delivery_duration_seconds_bucket[5m])) by (le, channel_type))",
+            "legendFormat": "{{channel_type}} p99"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20}
+      }
+    ]
+  }
+}

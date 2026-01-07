@@ -1,0 +1,22 @@
+{
+  "venvPath": "/home/logisticos-two/dev",
+  "venv": "miniconda3",
+  "pythonVersion": "3.13",
+  "pythonPlatform": "Linux",
+  "pythonPath": "/home/logisticos-two/dev/miniconda3/bin/python",
+  "extraPaths": [
+    "/home/logisticos-two/dev/miniconda3/lib/python3.13/site-packages"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "inference",
+      "pythonVersion": "3.13",
+      "pythonPlatform": "Linux",
+      "pythonPath": "/home/logisticos-two/dev/miniconda3/bin/python",
+      "extraPaths": [
+        "/home/logisticos-two/dev/miniconda3/lib/python3.13/site-packages"
+      ]
+    }
+  ]
+}
+

@@ -1,0 +1,369 @@
+// VIGIAS-IA Database Schema - DBML
+// Versión: 1.3.0
+// Última actualización: 2025-12-23
+// Motor: PostgreSQL 16+ con extensiones pgcrypto y pgvector
+// Paste this content into https://dbdiagram.io/d
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+Enum event_status_enum {
+  PENDING
+  ACKNOWLEDGED
+  RESOLVED
+  FALSE_POSITIVE
+}
+
+Enum event_severity_enum {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+// ==========================================
+// MULTI-TENANCY CORE
+// ==========================================
+
+Table organizations {
+  id uuid [pk, default: `gen_random_uuid()`]
+  slug varchar(100) [unique, not null, note: "URL-friendly: vigias-local"]
+  name varchar(200) [not null]
+  is_managed boolean [default: false, note: "true=SaaS, false=On-Premise"]
+  config jsonb [default: '{}']
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+  
+  indexes {
+    slug [unique]
+    is_active
+  }
+}
+
+Table org_zones {
+  id uuid [pk, default: `gen_random_uuid()`]
+  organization_id uuid [ref: > organizations.id, not null]
+  slug varchar(100) [not null, note: "Location-based: zona-default"]
+  name varchar(200) [not null]
+  location_description text
+  geo_bounds jsonb [note: "GeoJSON polygon"]
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+  
+  indexes {
+    (organization_id, slug) [unique, name: 'unique_zone_per_org']
+    organization_id
+  }
+}
+
+// ==========================================
+// RBAC & USERS
+// ==========================================
+
+Table roles {
+  id uuid [pk, default: `gen_random_uuid()`]
+  code varchar(50) [unique, not null, note: "SYS_ADMIN, SEC_GUARD, etc"]
+  name varchar(100) [not null]
+  description text
+  is_system_role boolean [default: false, note: "Cannot be deleted"]
+}
+
+Table permissions {
+  id uuid [pk, default: `gen_random_uuid()`]
+  slug varchar(100) [unique, not null, note: "camera:view, alarm:resolve, etc"]
+  description text
+}
+
+Table role_permissions {
+  role_id uuid [ref: > roles.id]
+  permission_id uuid [ref: > permissions.id]
+  
+  indexes {
+    (role_id, permission_id) [pk]
+  }
+}
+
+Table users {
+  id uuid [pk, default: `gen_random_uuid()`]
+  username varchar(50) [unique, not null]
+  email varchar(100) [unique, not null]
+  password_hash varchar(255) [not null]
+  role_id uuid [ref: > roles.id]
+  full_name varchar(150)
+  is_active boolean [default: true]
+  last_login timestamptz
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+}
+
+// ==========================================
+// INFRASTRUCTURE (CAMERAS)
+// ==========================================
+
+Table cameras {
+  id uuid [pk, default: `gen_random_uuid()`]
+  name varchar(100) [not null]
+  rtsp_url text [not null, note: "RTSP stream URL"]
+  location_name varchar(100)
+  zone_id uuid [ref: > org_zones.id, note: "Multi-tenancy FK"]
+  geo_location point [note: "PostgreSQL native POINT type (lat/long)"]
+  meta_info jsonb [default: '{}', note: "Model, IP, firmware, resolution"]
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+  
+  indexes {
+    zone_id [name: 'idx_cameras_zone']
+    is_active
+    meta_info [type: gin, name: 'idx_cameras_meta']
+  }
+}
+
+// ==========================================
+// AI CONFIGURATION
+// ==========================================
+
+Table camera_ai_configs {
+  id uuid [pk, default: `gen_random_uuid()`]
+  camera_id uuid [ref: > cameras.id, not null]
+  event_type varchar(50) [not null, note: "intrusion, loitering, line_crossing, etc"]
+  default_severity event_severity_enum [default: 'MEDIUM']
+  confidence_threshold decimal(4,3) [default: 0.700, note: "0.0-1.0"]
+  debounce_seconds integer [default: 60, note: "Anti-flood delay for same track_id"]
+  roi_polygon jsonb [note: "Polygon zone coordinates [[x1,y1], [x2,y2], ...]"]
+  active_schedule jsonb [note: "Time-based activation: {start, end, days}"]
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  
+  indexes {
+    (camera_id, event_type) [unique, name: 'unique_camera_event_config']
+    camera_id
+  }
+}
+
+// ==========================================
+// EVENTS / ALARMS
+// ==========================================
+
+Table events {
+  id uuid [pk, default: `gen_random_uuid()`]
+  camera_id uuid [ref: > cameras.id, note: "SET NULL on delete"]
+  config_id uuid [ref: > camera_ai_configs.id, note: "Which rule triggered this"]
+  event_type varchar(50) [not null]
+  track_id varchar(100) [note: "DeepSort/ByteTrack ID for debouncing"]
+  confidence decimal(4,3) [note: "AI confidence 0.0-1.0"]
+  snapshot_path text [note: "Evidence image path (MinIO bucket)"]
+  video_clip_path text [note: "Evidence video path (MinIO bucket)"]
+  bbox jsonb [note: "Bounding box [x, y, w, h]"]
+  severity event_severity_enum [default: 'MEDIUM']
+  status event_status_enum [default: 'PENDING']
+  created_at timestamptz [default: `now()`, note: "Insertion timestamp"]
+  occurred_at timestamptz [default: `now()`, note: "Actual detection timestamp"]
+  
+  indexes {
+    (camera_id, event_type, track_id, occurred_at) [name: 'idx_events_debounce', note: "Critical for debouncing"]
+    (status, severity, occurred_at) [name: 'idx_events_dashboard', note: "Dashboard queries"]
+    occurred_at [name: 'idx_events_date', note: "Date range queries"]
+    camera_id
+    config_id
+  }
+}
+
+Table event_actions {
+  id uuid [pk, default: `gen_random_uuid()`]
+  event_id uuid [ref: > events.id, note: "CASCADE on delete"]
+  user_id uuid [ref: > users.id, note: "User who performed action"]
+  previous_status event_status_enum
+  new_status event_status_enum
+  comment text [note: "User notes: 'Falsa alarma, era un perro'"]
+  created_at timestamptz [default: `now()`]
+  
+  indexes {
+    event_id
+    user_id
+  }
+}
+
+// ==========================================
+// FACE RECOGNITION
+// ==========================================
+
+Table faces {
+  id serial [pk, note: "SERIAL for pgvector compatibility"]
+  name varchar(100) [not null]
+  organization_id uuid [ref: > organizations.id, note: "CASCADE on delete, multi-tenancy"]
+  category varchar(20) [default: 'KNOWN', note: "KNOWN, BLACKLIST, UNKNOWN"]
+  meta_info jsonb [default: '{}', note: "employee_id, dept, etc"]
+  image_path text [note: "Photo storage path for training"]
+  embedding "vector(512)" [note: "InsightFace buffalo_l 512-dim embedding"]
+  created_at timestamptz [default: `now()`]
+  
+  indexes {
+    organization_id [name: 'idx_faces_organization', note: "WHERE organization_id IS NOT NULL"]
+    category [name: 'idx_faces_category']
+    embedding [type: ivfflat, name: 'idx_faces_embedding_cosine', note: "Cosine similarity search"]
+  }
+}
+
+// ==========================================
+// NOTIFICATIONS & ALERTS
+// ==========================================
+
+Table notification_channels {
+  id uuid [pk, default: `gen_random_uuid()`]
+  organization_id uuid [ref: > organizations.id, not null, note: "CASCADE on delete"]
+  name varchar(100) [not null]
+  channel_type varchar(20) [not null, note: "EMAIL, SMS, WEBHOOK, SLACK, TELEGRAM, WHATSAPP"]
+  config jsonb [not null, note: "Channel-specific: recipients, URLs, tokens"]
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+  
+  indexes {
+    organization_id [name: 'idx_notification_channels_org']
+    channel_type [name: 'idx_notification_channels_type']
+    is_active [name: 'idx_notification_channels_active', note: "WHERE is_active = TRUE"]
+  }
+}
+
+Table notification_rules {
+  id uuid [pk, default: `gen_random_uuid()`]
+  organization_id uuid [ref: > organizations.id, not null, note: "CASCADE on delete"]
+  channel_id uuid [ref: > notification_channels.id, not null, note: "CASCADE on delete"]
+  name varchar(100) [not null]
+  description text
+  
+  // Trigger conditions (NULL = all)
+  event_types jsonb [note: "Filter: ['intrusion', 'loitering']"]
+  severities jsonb [note: "Filter: ['CRITICAL', 'HIGH']"]
+  camera_ids jsonb [note: "Filter: List of camera UUIDs as strings"]
+  zone_ids jsonb [note: "Filter: List of zone UUIDs as strings"]
+  
+  // Schedule
+  active_schedule jsonb [note: "{days: [1,2,3], start_time: '18:00', end_time: '08:00'}"]
+  
+  // Rate limiting
+  cooldown_minutes integer [default: 5, note: "Min time between notifications for same trigger"]
+  
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+  
+  indexes {
+    organization_id [name: 'idx_notification_rules_org']
+    channel_id [name: 'idx_notification_rules_channel']
+    is_active [name: 'idx_notification_rules_active', note: "WHERE is_active = TRUE"]
+    event_types [type: gin, name: 'idx_notification_rules_event_types']
+    severities [type: gin, name: 'idx_notification_rules_severities']
+  }
+}
+
+Table notification_logs {
+  id uuid [pk, default: `gen_random_uuid()`]
+  rule_id uuid [ref: > notification_rules.id, not null, note: "CASCADE on delete"]
+  event_id uuid [ref: > events.id, note: "SET NULL on delete"]
+  channel_type varchar(20) [not null]
+  recipient varchar(255) [not null, note: "email, phone number, webhook URL"]
+  status varchar(20) [not null, note: "SENT, FAILED, PENDING"]
+  error_message text
+  sent_at timestamptz [default: `now()`]
+  
+  indexes {
+    rule_id [name: 'idx_notification_logs_rule']
+    event_id [name: 'idx_notification_logs_event']
+    status [name: 'idx_notification_logs_status']
+    sent_at [name: 'idx_notification_logs_sent_at', note: "DESC"]
+  }
+}
+
+// ==========================================
+// AUDIT & COMPLIANCE
+// ==========================================
+
+Table audit_logs {
+  id uuid [pk, default: `gen_random_uuid()`]
+  user_id uuid [ref: > users.id, note: "NULL if system action"]
+  module varchar(50) [note: "USER_MGMT, CAMERA_CONFIG, SYSTEM"]
+  action varchar(50) [note: "CREATE, UPDATE, DELETE, LOGIN_FAILED"]
+  target_id uuid [note: "ID of affected resource"]
+  details jsonb [note: "Full change details: {old_value, new_value}"]
+  ip_address inet
+  user_agent text
+  created_at timestamptz [default: `now()`]
+  
+  indexes {
+    user_id
+    module
+    action
+    created_at
+  }
+}
+
+// ==========================================
+// TABLE GROUPS FOR VISUALIZATION
+// ==========================================
+
+TableGroup multi_tenancy {
+  organizations
+  org_zones
+}
+
+TableGroup infrastructure {
+  cameras
+  camera_ai_configs
+}
+
+TableGroup events_group {
+  events
+  event_actions
+}
+
+TableGroup rbac {
+  users
+  roles
+  permissions
+  role_permissions
+}
+
+TableGroup face_recognition {
+  faces
+}
+
+TableGroup notifications {
+  notification_channels
+  notification_rules
+  notification_logs
+}
+
+TableGroup audit {
+  audit_logs
+}
+
+// ==========================================
+// NOTES
+// ==========================================
+
+// Extensions required:
+// - pgcrypto: For gen_random_uuid()
+// - vector: For pgvector embedding similarity search
+
+// Key Functions:
+// - update_updated_at_column(): Trigger function for updated_at fields
+// - find_similar_faces(): Helper function for face similarity search (see migration_003)
+
+// Important Constraints:
+// - organizations.slug: URL-friendly format (regex: ^[a-z0-9]+(?:-[a-z0-9]+)*$)
+// - org_zones.slug: Same format, unique per organization
+// - camera_ai_configs: Unique constraint on (camera_id, event_type)
+// - notification_channels.channel_type: CHECK constraint (EMAIL, SMS, WEBHOOK, SLACK, TELEGRAM, WHATSAPP)
+// - notification_logs.status: CHECK constraint (SENT, FAILED, PENDING)
+
+// Performance Indexes:
+// - idx_events_debounce: Critical for debouncing duplicate events by track_id
+// - idx_faces_embedding_cosine: IVFFlat index for fast similarity search
+// - GIN indexes on JSONB columns for efficient filtering
+

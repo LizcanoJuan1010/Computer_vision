@@ -1,0 +1,104 @@
+{
+  "dashboard": {
+    "title": "VIGIAS-IA Camera Health",
+    "tags": ["vigias", "cameras"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Camera FPS",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "vigias_camera_fps",
+            "legendFormat": "{{camera_name}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "title": "Camera CPU Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "vigias_camera_cpu_percent",
+            "legendFormat": "{{camera_name}}"
+          }
+        ],
+        "yaxes": [{
+          "format": "percent",
+          "max": 100
+        }],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "title": "Camera Memory Usage (MB)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "vigias_camera_memory_mb",
+            "legendFormat": "{{camera_name}}"
+          }
+        ],
+        "yaxes": [{
+          "format": "decmbytes"
+        }],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+      },
+      {
+        "title": "Frames Dropped (Rate)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(vigias_camera_frames_dropped_total[5m])",
+            "legendFormat": "{{camera_name}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "title": "Cameras Online",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "vigias_cameras_by_status{status=\"ONLINE\"}",
+            "legendFormat": "Online"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 0, "y": 16}
+      },
+      {
+        "title": "Cameras Offline",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "vigias_cameras_by_status{status=\"OFFLINE\"}",
+            "legendFormat": "Offline"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 6, "y": 16}
+      },
+      {
+        "title": "Cameras in Error",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "vigias_cameras_by_status{status=\"ERROR\"}",
+            "legendFormat": "Error"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 12, "y": 16}
+      },
+      {
+        "title": "Cameras in Maintenance",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "vigias_cameras_by_status{status=\"MAINTENANCE\"}",
+            "legendFormat": "Maintenance"
+          }
+        ],
+        "gridPos": {"h": 4, "w": 6, "x": 18, "y": 16}
+      }
+    ]
+  }
+}

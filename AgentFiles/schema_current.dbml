@@ -1,0 +1,168 @@
+// VIGIAS-IA Database Schema
+// Paste this content into https://dbdiagram.io/d
+
+// ==========================================
+// ENUMS
+// ==========================================
+
+Enum user_role_enum {
+  ADMIN
+  OPERATOR
+  VIEWER
+  AUDITOR
+}
+
+Enum event_status_enum {
+  PENDING
+  ACKNOWLEDGED
+  RESOLVED
+  FALSE_POSITIVE
+}
+
+Enum event_severity_enum {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+// ==========================================
+// RBAC & USERS
+// ==========================================
+
+Table roles {
+  id uuid [pk, default: `gen_random_uuid()`]
+  code varchar(50) [unique, not null]
+  name varchar(100) [not null]
+  description text
+  is_system_role boolean [default: false]
+}
+
+Table permissions {
+  id uuid [pk, default: `gen_random_uuid()`]
+  slug varchar(100) [unique, not null]
+  description text
+}
+
+Table role_permissions {
+  role_id uuid [ref: > roles.id]
+  permission_id uuid [ref: > permissions.id]
+  
+  indexes {
+    (role_id, permission_id) [pk]
+  }
+}
+
+Table users {
+  id uuid [pk, default: `gen_random_uuid()`]
+  username varchar(50) [unique, not null]
+  email varchar(100) [unique, not null]
+  password_hash varchar(255) [not null]
+  role_id uuid [ref: > roles.id]
+  full_name varchar(150)
+  is_active boolean [default: true]
+  last_login timestamptz
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+}
+
+// ==========================================
+// INFRASTRUCTURE
+// ==========================================
+
+Table cameras {
+  id uuid [pk, default: `gen_random_uuid()`]
+  name varchar(100) [not null]
+  rtsp_url text [not null]
+  location_name varchar(100)
+  geo_location point
+  meta_info jsonb [default: '{}']
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  updated_at timestamptz [default: `now()`]
+}
+
+// ==========================================
+// AI CONFIGURATION
+// ==========================================
+
+Table camera_ai_configs {
+  id uuid [pk, default: `gen_random_uuid()`]
+  camera_id uuid [ref: > cameras.id]
+  event_type varchar(50) [not null]
+  default_severity event_severity_enum [default: 'MEDIUM']
+  confidence_threshold decimal(4,3) [default: 0.700]
+  debounce_seconds integer [default: 60]
+  roi_polygon jsonb
+  active_schedule jsonb
+  is_active boolean [default: true]
+  created_at timestamptz [default: `now()`]
+  
+  indexes {
+    (camera_id, event_type) [unique, name: 'unique_camera_event_config']
+  }
+}
+
+// ==========================================
+// EVENTS / ALARMS
+// ==========================================
+
+Table events {
+  id uuid [pk, default: `gen_random_uuid()`]
+  camera_id uuid [ref: > cameras.id]
+  config_id uuid [ref: > camera_ai_configs.id]
+  event_type varchar(50) [not null]
+  track_id varchar(100)
+  confidence decimal(4,3)
+  snapshot_path text
+  video_clip_path text
+  bbox jsonb
+  severity event_severity_enum [default: 'MEDIUM']
+  status event_status_enum [default: 'PENDING']
+  created_at timestamptz [default: `now()`]
+  occurred_at timestamptz [default: `now()`]
+  
+  indexes {
+    (camera_id, event_type, track_id, occurred_at) [name: 'idx_events_debounce']
+    (status, severity, occurred_at) [name: 'idx_events_dashboard']
+    occurred_at [name: 'idx_events_date']
+  }
+}
+
+Table event_actions {
+  id uuid [pk, default: `gen_random_uuid()`]
+  event_id uuid [ref: > events.id]
+  user_id uuid [ref: > users.id]
+  previous_status event_status_enum
+  new_status event_status_enum
+  comment text
+  created_at timestamptz [default: `now()`]
+}
+
+// ==========================================
+// AUDIT
+// ==========================================
+
+Table audit_logs {
+  id uuid [pk, default: `gen_random_uuid()`]
+  user_id uuid [ref: > users.id]
+  module varchar(50)
+  action varchar(50)
+  target_id uuid
+  details jsonb
+  ip_address inet
+  user_agent text
+  created_at timestamptz [default: `now()`]
+}
+
+// ==========================================
+// FACE RECOGNITION
+// ==========================================
+
+Table faces {
+  id serial [pk]
+  name varchar(100)
+  embedding "vector(512)"
+  created_at timestamptz [default: `now()`]
+}

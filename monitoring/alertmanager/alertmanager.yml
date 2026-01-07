@@ -1,0 +1,111 @@
+# Alertmanager Configuration for VIGIAS-IA
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: 'vigias-alerts@company.com'
+  smtp_auth_username: 'vigias-alerts@company.com'
+  smtp_auth_password: 'YOUR_APP_PASSWORD_HERE'
+  smtp_require_tls: true
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Route tree for alerts
+route:
+  group_by: ['alertname', 'component']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: 'default'
+
+  routes:
+    # Critical alerts go to multiple channels
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      continue: false
+
+    # High severity alerts
+    - match:
+        severity: high
+      receiver: 'high-alerts'
+      continue: false
+
+    # Warning alerts
+    - match:
+        severity: warning
+      receiver: 'warning-alerts'
+      continue: false
+
+# Alert receivers
+receivers:
+  # Default receiver
+  - name: 'default'
+    email_configs:
+      - to: 'ops-team@company.com'
+        headers:
+          Subject: '[VIGIAS] Alert: {{ .GroupLabels.alertname }}'
+        html: '{{ template "email.default.html" . }}'
+
+    webhook_configs:
+      - url: 'http://router:8003/api/v1/webhooks/alertmanager'
+        send_resolved: true
+
+  # Critical alerts - multiple channels
+  - name: 'critical-alerts'
+    email_configs:
+      - to: 'oncall@company.com,ops-team@company.com'
+        headers:
+          Subject: '🚨 [VIGIAS CRITICAL] {{ .GroupLabels.alertname }}'
+        html: '{{ template "email.default.html" . }}'
+
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#vigias-critical-alerts'
+        title: '🚨 VIGIAS Critical Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}'
+        send_resolved: true
+
+    webhook_configs:
+      - url: 'http://router:8003/api/v1/webhooks/alertmanager'
+        send_resolved: true
+
+  # High severity alerts
+  - name: 'high-alerts'
+    email_configs:
+      - to: 'ops-team@company.com'
+        headers:
+          Subject: '⚠️ [VIGIAS HIGH] {{ .GroupLabels.alertname }}'
+        html: '{{ template "email.default.html" . }}'
+
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#vigias-alerts'
+        title: '⚠️ VIGIAS High Priority Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}'
+        send_resolved: true
+
+  # Warning alerts
+  - name: 'warning-alerts'
+    email_configs:
+      - to: 'ops-team@company.com'
+        headers:
+          Subject: 'ℹ️ [VIGIAS Warning] {{ .GroupLabels.alertname }}'
+        html: '{{ template "email.default.html" . }}'
+
+# Inhibition rules - suppress alerts based on other active alerts
+inhibit_rules:
+  # If NATS is down, don't alert about cameras being offline
+  - source_match:
+      alertname: 'NATSDisconnected'
+    target_match_re:
+      alertname: 'Camera.*'
+    equal: ['component']
+
+  # If Redis is down, don't alert about cache issues
+  - source_match:
+      alertname: 'RedisDisconnected'
+    target_match_re:
+      alertname: '.*Cache.*'
+    equal: ['component']

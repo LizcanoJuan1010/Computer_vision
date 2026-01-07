@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.pytest_cache/
+.env
+
+# Go
+ingest/ingest_server
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
+
+# Project Specific
+test_video.mp4
+*.mp4
+*.avi
+*.mov
+yolo11n.pt
+yolo11n.onnx
+black_list/*
+!black_list/.gitkeep
+test/
+
+# Logs
+*.log
+
+# Generated
+available_cameras.txt
+inference/weights/
+inference/weights/

@@ -1,0 +1,1038 @@
+--
+-- PostgreSQL database dump
+--
+
+\restrict EhTFUkEHiqtzsnNneZVtO8F81Z3v8fhVl20lvsSDqTEZ8Tqn3Ug1UGUf7nxGaLW
+
+-- Dumped from database version 16.11 (Debian 16.11-1.pgdg12+1)
+-- Dumped by pg_dump version 16.11 (Debian 16.11-1.pgdg12+1)
+
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SELECT pg_catalog.set_config('search_path', '', false);
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
+
+--
+-- Name: pgcrypto; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION pgcrypto; Type: COMMENT; Schema: -; Owner: 
+--
+
+COMMENT ON EXTENSION pgcrypto IS 'cryptographic functions';
+
+
+--
+-- Name: vector; Type: EXTENSION; Schema: -; Owner: -
+--
+
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+
+
+--
+-- Name: EXTENSION vector; Type: COMMENT; Schema: -; Owner: 
+--
+
+COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access methods';
+
+
+--
+-- Name: event_severity_enum; Type: TYPE; Schema: public; Owner: user
+--
+
+CREATE TYPE public.event_severity_enum AS ENUM (
+    'CRITICAL',
+    'HIGH',
+    'MEDIUM',
+    'LOW',
+    'INFO'
+);
+
+
+ALTER TYPE public.event_severity_enum OWNER TO "user";
+
+--
+-- Name: event_status_enum; Type: TYPE; Schema: public; Owner: user
+--
+
+CREATE TYPE public.event_status_enum AS ENUM (
+    'PENDING',
+    'ACKNOWLEDGED',
+    'RESOLVED',
+    'FALSE_POSITIVE'
+);
+
+
+ALTER TYPE public.event_status_enum OWNER TO "user";
+
+--
+-- Name: update_updated_at_column(); Type: FUNCTION; Schema: public; Owner: user
+--
+
+CREATE FUNCTION public.update_updated_at_column() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.update_updated_at_column() OWNER TO "user";
+
+SET default_tablespace = '';
+
+SET default_table_access_method = heap;
+
+--
+-- Name: audit_logs; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.audit_logs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid,
+    module character varying(50),
+    action character varying(50),
+    target_id uuid,
+    details jsonb,
+    ip_address inet,
+    user_agent text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.audit_logs OWNER TO "user";
+
+--
+-- Name: camera_ai_configs; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.camera_ai_configs (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    camera_id uuid NOT NULL,
+    event_type character varying(50) NOT NULL,
+    default_severity public.event_severity_enum DEFAULT 'MEDIUM'::public.event_severity_enum NOT NULL,
+    confidence_threshold numeric(4,3) DEFAULT 0.700 NOT NULL,
+    debounce_seconds integer DEFAULT 60 NOT NULL,
+    roi_polygon jsonb,
+    active_schedule jsonb,
+    is_active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.camera_ai_configs OWNER TO "user";
+
+--
+-- Name: cameras; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.cameras (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name character varying(100) NOT NULL,
+    rtsp_url text NOT NULL,
+    location_name character varying(100),
+    meta_info jsonb DEFAULT '{}'::jsonb,
+    is_active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    zone_id uuid
+);
+
+
+ALTER TABLE public.cameras OWNER TO "user";
+
+--
+-- Name: event_actions; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.event_actions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    event_id uuid NOT NULL,
+    user_id uuid,
+    previous_status public.event_status_enum,
+    new_status public.event_status_enum,
+    comment text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.event_actions OWNER TO "user";
+
+--
+-- Name: events; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.events (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    camera_id uuid,
+    config_id uuid,
+    event_type character varying(50) NOT NULL,
+    track_id character varying(100),
+    confidence numeric(4,3),
+    snapshot_path text,
+    video_clip_path text,
+    bbox jsonb,
+    severity public.event_severity_enum DEFAULT 'MEDIUM'::public.event_severity_enum NOT NULL,
+    status public.event_status_enum DEFAULT 'PENDING'::public.event_status_enum NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    occurred_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.events OWNER TO "user";
+
+--
+-- Name: faces; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.faces (
+    id integer NOT NULL,
+    name character varying(100) NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.faces OWNER TO "user";
+
+--
+-- Name: faces_id_seq; Type: SEQUENCE; Schema: public; Owner: user
+--
+
+CREATE SEQUENCE public.faces_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+ALTER SEQUENCE public.faces_id_seq OWNER TO "user";
+
+--
+-- Name: faces_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: user
+--
+
+ALTER SEQUENCE public.faces_id_seq OWNED BY public.faces.id;
+
+
+--
+-- Name: org_zones; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.org_zones (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_id uuid NOT NULL,
+    slug character varying(100) NOT NULL,
+    name character varying(200) NOT NULL,
+    location_description text,
+    geo_bounds jsonb,
+    is_active boolean DEFAULT true,
+    created_at timestamp with time zone DEFAULT now(),
+    updated_at timestamp with time zone DEFAULT now(),
+    CONSTRAINT zone_slug_format CHECK (((slug)::text ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'::text))
+);
+
+
+ALTER TABLE public.org_zones OWNER TO "user";
+
+--
+-- Name: organizations; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.organizations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    slug character varying(100) NOT NULL,
+    name character varying(200) NOT NULL,
+    is_managed boolean DEFAULT false,
+    config jsonb DEFAULT '{}'::jsonb,
+    is_active boolean DEFAULT true,
+    created_at timestamp with time zone DEFAULT now(),
+    updated_at timestamp with time zone DEFAULT now(),
+    CONSTRAINT org_slug_format CHECK (((slug)::text ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'::text))
+);
+
+
+ALTER TABLE public.organizations OWNER TO "user";
+
+--
+-- Name: permissions; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.permissions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    slug character varying(100) NOT NULL,
+    description text
+);
+
+
+ALTER TABLE public.permissions OWNER TO "user";
+
+--
+-- Name: role_permissions; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.role_permissions (
+    role_id uuid NOT NULL,
+    permission_id uuid NOT NULL
+);
+
+
+ALTER TABLE public.role_permissions OWNER TO "user";
+
+--
+-- Name: roles; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.roles (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    code character varying(50) NOT NULL,
+    name character varying(100) NOT NULL,
+    description text,
+    is_system_role boolean DEFAULT false NOT NULL
+);
+
+
+ALTER TABLE public.roles OWNER TO "user";
+
+--
+-- Name: users; Type: TABLE; Schema: public; Owner: user
+--
+
+CREATE TABLE public.users (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    username character varying(50) NOT NULL,
+    email character varying(100) NOT NULL,
+    password_hash character varying(255) NOT NULL,
+    role_id uuid,
+    full_name character varying(150),
+    is_active boolean DEFAULT true NOT NULL,
+    last_login timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+ALTER TABLE public.users OWNER TO "user";
+
+--
+-- Name: faces id; Type: DEFAULT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.faces ALTER COLUMN id SET DEFAULT nextval('public.faces_id_seq'::regclass);
+
+
+--
+-- Data for Name: audit_logs; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.audit_logs (id, user_id, module, action, target_id, details, ip_address, user_agent, created_at) FROM stdin;
+\.
+
+
+--
+-- Data for Name: camera_ai_configs; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.camera_ai_configs (id, camera_id, event_type, default_severity, confidence_threshold, debounce_seconds, roi_polygon, active_schedule, is_active, created_at) FROM stdin;
+af3b8840-048a-4869-ab99-8337cb8cc486	f55a7d08-651f-43e1-992b-7a9f5112b2c8	intrusion	HIGH	0.750	30	[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]	null	t	2025-12-19 19:31:35.688074+00
+\.
+
+
+--
+-- Data for Name: cameras; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.cameras (id, name, rtsp_url, location_name, meta_info, is_active, created_at, updated_at, zone_id) FROM stdin;
+1440355a-412f-41fe-a430-8f6b0390f27b	cam_701	rtsp://placeholder	\N	{}	t	2025-12-19 14:48:28.847213+00	2025-12-19 14:48:28.847213+00	91b428cb-30c1-400c-b49f-2a007484fc9a
+a3369b85-8f70-4ccb-b95a-3471860b5955	cam_1301	rtsp://placeholder	\N	{}	t	2025-12-19 18:27:00.9387+00	2025-12-19 18:27:00.9387+00	91b428cb-30c1-400c-b49f-2a007484fc9a
+9dd7717e-cac1-4520-b1d7-9818ea946f40	cam_2701	rtsp://placeholder	\N	{}	t	2025-12-19 18:27:00.9387+00	2025-12-19 18:27:00.9387+00	91b428cb-30c1-400c-b49f-2a007484fc9a
+f55a7d08-651f-43e1-992b-7a9f5112b2c8	Cámara Entrada Bodega	rtsp://192.168.1.100:554/stream1	Entrada principal de la bodega	{}	t	2025-12-19 19:30:15.21204+00	2025-12-19 19:30:15.21204+00	030fb874-0199-4a60-b2d2-6cf7e984b195
+da3d3b76-bbb6-424b-8f3b-2b12313715eb	Oficina Principal	rtsp://placeholder	\N	{}	t	2025-12-19 18:27:00.9387+00	2025-12-19 18:27:00.9387+00	030fb874-0199-4a60-b2d2-6cf7e984b195
+cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	Bodega Principal	rtsp://placeholder	\N	{}	t	2025-12-19 14:57:01.600555+00	2025-12-19 14:57:01.600555+00	030fb874-0199-4a60-b2d2-6cf7e984b195
+\.
+
+
+--
+-- Data for Name: event_actions; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.event_actions (id, event_id, user_id, previous_status, new_status, comment, created_at) FROM stdin;
+\.
+
+
+--
+-- Data for Name: events; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.events (id, camera_id, config_id, event_type, track_id, confidence, snapshot_path, video_clip_path, bbox, severity, status, created_at, occurred_at) FROM stdin;
+0a607149-8dba-454c-91e7-4656933ad764	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	5	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:48:28.849808+00	2025-12-19 14:48:28.849808+00
+b019cc57-bc95-40b4-8f04-0d05bda9ae9b	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	34	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:50:05.923713+00	2025-12-19 14:50:05.923713+00
+db9a5402-e60c-4a92-8fa7-6a61c8e4c81e	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	74	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:52:25.225948+00	2025-12-19 14:52:25.225948+00
+eb7abb22-a341-4a3b-957b-87523af874f3	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	133	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:54:26.489612+00	2025-12-19 14:54:26.489612+00
+00bd669a-5dc1-4be3-b932-8b7616c6f7fd	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	136	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:54:27.89312+00	2025-12-19 14:54:27.89312+00
+ee40411f-e9df-4ebb-92db-a7d35e1b179d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	142	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:54:29.656642+00	2025-12-19 14:54:29.656642+00
+4c6142e8-1de9-4a7d-8601-95c6381538a5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	144	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:54:31.339447+00	2025-12-19 14:54:31.339447+00
+a8be58e2-8b8a-496d-b753-e68e87eaa7c5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	150	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:54:45.645386+00	2025-12-19 14:54:45.645386+00
+4e0f436b-5f97-4d29-821f-07e95c623c5c	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	151	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:54:47.739911+00	2025-12-19 14:54:47.739911+00
+144346e9-4e93-4139-bbb9-3ac7efe602c8	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	161	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:55:16.134596+00	2025-12-19 14:55:16.134596+00
+bd057965-fae5-4da9-89ba-aa106a636718	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	174	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:55:29.341195+00	2025-12-19 14:55:29.341195+00
+101d1e03-b1ea-47f6-ac2e-2ba9ce17d337	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	190	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:55:45.788501+00	2025-12-19 14:55:45.788501+00
+8e595208-8695-476b-b3ec-510931f71595	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	221	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:56:29.052955+00	2025-12-19 14:56:29.052955+00
+4da2a9c6-b7a0-4dcf-98b3-9ce1b6c4bd18	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	244	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:56:57.795805+00	2025-12-19 14:56:57.795805+00
+2c22de39-370e-4808-a3cc-2c5ea43c09c6	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	294	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:58:19.707382+00	2025-12-19 14:58:19.707382+00
+7e7512dd-334d-408a-8cdf-dab4889a036c	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	297	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:58:21.47131+00	2025-12-19 14:58:21.47131+00
+2b9b9664-5133-4197-94a3-cd4602304447	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	306	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:58:51.178913+00	2025-12-19 14:58:51.178913+00
+cbe1471f-784c-4985-98fd-6660471ff049	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	297	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:58:53.886507+00	2025-12-19 14:58:53.886507+00
+9240762c-86fb-429a-9128-573c015cd6db	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	322	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:59:09.043099+00	2025-12-19 14:59:09.043099+00
+4b132117-6970-43f9-915f-83c731e7c9fa	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	324	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 14:59:13.122714+00	2025-12-19 14:59:13.122714+00
+9bd15fef-4fa2-4f97-9747-37a85c3b0a31	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	380	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:01:41.416526+00	2025-12-19 15:01:41.416526+00
+2fa4ca7f-c256-457b-a109-a100f93b81a3	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	385	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:02:10.053747+00	2025-12-19 15:02:10.053747+00
+976cb29a-debd-465f-9751-759054630cae	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	434	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:04:25.614821+00	2025-12-19 15:04:25.614821+00
+9ba2715a-22a9-46db-8df2-e0bf0e494b03	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	458	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:07:26.252312+00	2025-12-19 15:07:26.252312+00
+8d4ca0bb-9858-4345-b425-7a23aaaf428c	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	470	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:09:32.514754+00	2025-12-19 15:09:32.514754+00
+e93c008c-7ed4-4bae-89ef-2f428727bc14	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	482	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:10:19.001572+00	2025-12-19 15:10:19.001572+00
+0397fa0f-06b3-4100-a648-31c85213108d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	483	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:10:21.368283+00	2025-12-19 15:10:21.368283+00
+199644d1-4c08-488e-9212-a41fbbd16d4d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	502	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:12:34.428153+00	2025-12-19 15:12:34.428153+00
+3c544d46-8e63-4c78-88ba-1970c6d321df	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	603	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:21:25.503127+00	2025-12-19 15:21:25.503127+00
+e13e5e84-5325-42fb-b0c2-5df16533e79c	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	599	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:21:37.923505+00	2025-12-19 15:21:37.923505+00
+fd8eccd6-2e63-4cc5-a28d-b5ab5cfb36c1	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	608	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:21:41.009558+00	2025-12-19 15:21:41.009558+00
+56fff457-c8a4-451a-9287-b0029b22b49f	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	608	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:22:18.019917+00	2025-12-19 15:22:18.019917+00
+4291db09-512e-46de-bba0-09cee420b438	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	627	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:22:21.010554+00	2025-12-19 15:22:21.010554+00
+1dd3f629-c670-4015-9a2f-2f09c22a0637	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	608	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:22:32.558895+00	2025-12-19 15:22:32.558895+00
+b5e7d045-b82d-4dec-934e-56255866fdd8	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	640	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:22:42.612115+00	2025-12-19 15:22:42.612115+00
+8beec177-c13e-4614-9520-da2e26293647	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	671	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:23:39.766359+00	2025-12-19 15:23:39.766359+00
+7b552d8d-6476-45c9-9add-f44488684d62	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	671	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:24:06.814921+00	2025-12-19 15:24:06.814921+00
+bdf6be40-8acb-4b38-a781-7469bec80160	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	708	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:24:09.034604+00	2025-12-19 15:24:09.034604+00
+6f489a16-9d6a-4400-802b-c2e4da479012	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	710	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:24:09.035901+00	2025-12-19 15:24:09.035901+00
+721ad448-45e2-4afc-803c-c5950b1bc35e	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	754	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:25:42.833744+00	2025-12-19 15:25:42.833744+00
+01dba567-cd07-4311-825e-0b453f911814	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	774	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:26:09.829779+00	2025-12-19 15:26:09.829779+00
+26a033df-9c50-4293-ba1d-180b52f3a5a1	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	774	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:26:26.881836+00	2025-12-19 15:26:26.881836+00
+f4e74849-afd6-41ca-8b11-ead8e5133aa1	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	830	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:27:37.105509+00	2025-12-19 15:27:37.105509+00
+ade2ca17-696a-46d0-91a7-4630b2bbce77	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	852	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:28:43.639951+00	2025-12-19 15:28:43.639951+00
+492e7075-edb8-46a1-a34a-4bb1e8769688	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	862	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:29:27.376756+00	2025-12-19 15:29:27.376756+00
+0927faeb-60b0-4ad8-86a6-9a57cc1793a5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	879	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:29:46.076658+00	2025-12-19 15:29:46.076658+00
+371803e0-4529-403b-8e81-cb6e59a3c5c7	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	874	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:29:47.639426+00	2025-12-19 15:29:47.639426+00
+4a28a866-7e44-439f-a271-21175dd46146	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	879	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:30:31.3545+00	2025-12-19 15:30:31.3545+00
+a1809719-55bd-4336-855f-c860074ec3a6	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	874	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:30:32.301603+00	2025-12-19 15:30:32.301603+00
+5ae330bb-c4b6-4303-a6be-d975843ff0ad	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	913	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:32:02.701503+00	2025-12-19 15:32:02.701503+00
+381fea95-da1d-405f-a743-0fb0ea501b7b	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	914	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:32:05.516455+00	2025-12-19 15:32:05.516455+00
+b5f37c9c-72be-42d1-9f93-573848706265	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	915	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:32:21.303568+00	2025-12-19 15:32:21.303568+00
+c51e2b52-fcfd-476f-99b2-34d316f44931	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	951	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:33:01.867364+00	2025-12-19 15:33:01.867364+00
+9ff7b1ca-7f90-49fa-ab24-72fd193be4c2	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	951	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:33:14.281745+00	2025-12-19 15:33:14.281745+00
+bfd9cf93-a500-4f34-b9ac-dd69cc3020f1	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1041	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:35:20.342218+00	2025-12-19 15:35:20.342218+00
+839ea266-ccd5-4f25-8e75-3debc70a64e2	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1042	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:35:21.655101+00	2025-12-19 15:35:21.655101+00
+95e7e723-1d2e-4773-83c9-3bfb0a0380f7	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1053	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:35:31.465103+00	2025-12-19 15:35:31.465103+00
+0621b745-ec87-47fb-a678-5372456522c7	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1090	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:36:28.560998+00	2025-12-19 15:36:28.560998+00
+dd5dbfbe-7982-4c0c-a241-c0a9601d1646	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1094	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:36:34.047749+00	2025-12-19 15:36:34.047749+00
+addee51a-80ef-4f94-af9f-39939c79d839	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1099	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:36:39.433345+00	2025-12-19 15:36:39.433345+00
+9670f468-67dd-49b0-811e-14a1a3cb71ab	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1094	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:36:44.056919+00	2025-12-19 15:36:44.056919+00
+6d3f9195-8d80-403e-b63c-4fedaec11105	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1129	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:38:07.138086+00	2025-12-19 15:38:07.138086+00
+5b4356a4-076e-4d70-a2aa-c412b9a5a899	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1149	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:38:33.166417+00	2025-12-19 15:38:33.166417+00
+cd199bee-52b1-45e0-a87f-714eae769473	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1153	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:38:44.075695+00	2025-12-19 15:38:44.075695+00
+74b54ccb-19c4-4514-af9b-ba4e329e2f78	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1154	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:38:47.086988+00	2025-12-19 15:38:47.086988+00
+d9fce4eb-2686-4f0f-9a32-b3e4eb99c4d6	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1173	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:39:06.276674+00	2025-12-19 15:39:06.276674+00
+2e512431-f3db-433a-9f0e-c1dedfca9d68	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1174	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:39:07.604701+00	2025-12-19 15:39:07.604701+00
+b36fac48-b5c8-458b-8ec7-89c3d7b6001c	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1178	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:39:07.91606+00	2025-12-19 15:39:07.91606+00
+88b6ef52-f4d1-46dc-84ec-3fbdb62570ab	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1254	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:40:12.303459+00	2025-12-19 15:40:12.303459+00
+0c7a517a-9e1b-4e18-8cba-2fc6d707fc37	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1310	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:40:58.396941+00	2025-12-19 15:40:58.396941+00
+4a18d166-bac4-4d31-948b-78d71d71eada	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1256	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:41:03.768161+00	2025-12-19 15:41:03.768161+00
+a3f861c3-5117-4758-af35-20b54e072f87	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1318	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:41:04.534913+00	2025-12-19 15:41:04.534913+00
+865073f1-34a6-4e86-aa70-4870a6d39532	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1327	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:41:36.668371+00	2025-12-19 15:41:36.668371+00
+a737f99a-a5e9-41a4-b522-54f1025175bd	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1323	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:42:20.347365+00	2025-12-19 15:42:20.347365+00
+6c7f1e1f-b908-4a7d-bcb7-71ec4757f372	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1414	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:44:58.660661+00	2025-12-19 15:44:58.660661+00
+c4b24a63-5914-46d1-919d-efbf2ddd9be6	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1475	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:47:29.844459+00	2025-12-19 15:47:29.844459+00
+a0cd9d67-372f-41a0-a15e-3db2d66e4995	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1475	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:47:40.003817+00	2025-12-19 15:47:40.003817+00
+18047647-f73f-4bd6-97d2-fc99bff38bf9	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1484	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:47:51.614763+00	2025-12-19 15:47:51.614763+00
+00ee9d90-e712-4d1f-a7e5-5f30ff1a97df	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1515	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:48:14.556456+00	2025-12-19 15:48:14.556456+00
+270232ea-f159-4d89-9a68-f727add7e0aa	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1496	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:48:19.523522+00	2025-12-19 15:48:19.523522+00
+921bac58-2cc5-446d-9c4e-c39a6a52b801	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1549	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:49:07.604971+00	2025-12-19 15:49:07.604971+00
+7aa859f9-c2c9-459a-8a3b-5dcc16a4d378	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1581	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:50:32.456601+00	2025-12-19 15:50:32.456601+00
+4c116fdd-d0cf-4a52-b84e-ab151fdc835d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1596	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:51:36.893422+00	2025-12-19 15:51:36.893422+00
+c72819fc-153f-47fe-a36d-8172e5901303	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1599	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:51:41.016635+00	2025-12-19 15:51:41.016635+00
+8e8dc530-33ae-465a-aba3-48e6c06ecb52	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1625	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:53:04.771169+00	2025-12-19 15:53:04.771169+00
+c45c6ff9-4450-4a18-83f6-70f2a243459d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1645	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:53:56.900861+00	2025-12-19 15:53:56.900861+00
+85898e9e-1ae9-476a-82c8-5d79ae292c2b	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1666	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:54:40.534319+00	2025-12-19 15:54:40.534319+00
+7e57a4c9-503c-4580-8f9c-a174d2aaf980	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1730	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:55:54.799592+00	2025-12-19 15:55:54.799592+00
+f8aa6135-b63b-48ba-a8be-ddc61b6b8052	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1732	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:55:57.068548+00	2025-12-19 15:55:57.068548+00
+5ada1642-fbb0-485b-9853-9dc5e54b1e7a	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1760	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:56:16.581504+00	2025-12-19 15:56:16.581504+00
+d3508d75-c909-41e5-8087-26a8c23e7300	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1798	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:56:57.496033+00	2025-12-19 15:56:57.496033+00
+fb1b1b36-bc0e-4d47-8452-42a8c20dccba	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1853	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:58:37.939393+00	2025-12-19 15:58:37.939393+00
+6e42c884-3acb-48a2-a04b-5813ed0183f9	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1853	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:58:49.502047+00	2025-12-19 15:58:49.502047+00
+7f405770-9166-43ca-a6e1-79d16bd69537	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1853	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:59:00.670349+00	2025-12-19 15:59:00.670349+00
+dea60402-97dc-455c-ac83-59eb4b5a8714	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1868	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:59:02.597432+00	2025-12-19 15:59:02.597432+00
+31992749-ec3a-4c33-8a34-e45b4aff79bd	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1853	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:59:10.706931+00	2025-12-19 15:59:10.706931+00
+62d4e8dd-054c-4f65-84dc-9175e218dd8f	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1853	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:59:22.665563+00	2025-12-19 15:59:22.665563+00
+bd764f5c-5b99-47d2-a26b-0a4323d1f3ef	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1853	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:59:34.633383+00	2025-12-19 15:59:34.633383+00
+456249b7-84e8-4044-ac7a-867a0029fb36	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1853	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 15:59:46.150905+00	2025-12-19 15:59:46.150905+00
+5c158fa3-11b0-49a6-a93b-7208a7ac171b	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1931	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:01:27.022727+00	2025-12-19 16:01:27.022727+00
+38fda3f6-1c20-4156-8755-ea7d6ba6cf7f	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1931	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:01:47.400499+00	2025-12-19 16:01:47.400499+00
+8f9c8ae0-a604-4323-a9b9-5da411287ffa	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1954	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:02:11.441+00	2025-12-19 16:02:11.441+00
+096e4427-101f-44d4-9fda-4f45c0013dbd	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1963	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:02:37.924442+00	2025-12-19 16:02:37.924442+00
+8907ff8b-d0b1-4879-86e9-75db81c473c0	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2023	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:04:45.202334+00	2025-12-19 16:04:45.202334+00
+a4a84fc1-0ca6-4a63-89e7-0ddf4d4929a5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2025	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:04:48.529351+00	2025-12-19 16:04:48.529351+00
+e8e28f59-f63a-4696-831d-fd0f11f02957	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2149	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:08:56.197796+00	2025-12-19 16:08:56.197796+00
+c0f1cbf6-f66c-403b-8bf2-44fb3d1e84e6	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2234	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:10:46.184565+00	2025-12-19 16:10:46.184565+00
+707a01d9-1389-47d5-98c0-42d56bff3613	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2233	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:11:24.786128+00	2025-12-19 16:11:24.786128+00
+db722e27-3f72-4491-84a0-6ba33c38b364	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2260	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:11:28.402599+00	2025-12-19 16:11:28.402599+00
+85566d35-88f2-4378-98ce-3f08f1cb8639	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2277	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:11:55.016885+00	2025-12-19 16:11:55.016885+00
+fc8d7152-f2ae-4ab1-a7cd-7c3d2a147c07	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2342	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:12:49.295642+00	2025-12-19 16:12:49.295642+00
+56edc7e6-087e-4085-88a2-cb3dc65585f9	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2342	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:13:07.224976+00	2025-12-19 16:13:07.224976+00
+33404835-f8ba-4f5c-9f6d-f7a571ee2f34	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2407	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:15:47.207136+00	2025-12-19 16:15:47.207136+00
+a9e80259-bf2b-4900-8ec2-c14f2147b750	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2408	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:15:48.982244+00	2025-12-19 16:15:48.982244+00
+b51bb5d3-3f8b-42e5-9e96-c15da577e56c	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2470	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:17:29.087503+00	2025-12-19 16:17:29.087503+00
+365cceb1-de19-4b0e-9b28-82cc14dc5b95	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2528	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:19:43.857388+00	2025-12-19 16:19:43.857388+00
+76073d4d-eb0a-4493-9131-3b2d58a550e5	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	2608	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:23:55.301026+00	2025-12-19 16:23:55.301026+00
+814911ea-82df-499c-a8db-ed121ccb9e71	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	2608	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:24:05.306887+00	2025-12-19 16:24:05.306887+00
+788f3e08-ce2b-418b-8a5f-179ce7fdcf43	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2621	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:25:20.525717+00	2025-12-19 16:25:20.525717+00
+fa1b0f49-443a-480f-b6e4-7eb1b2af220e	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2628	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:25:22.060522+00	2025-12-19 16:25:22.060522+00
+66e6dcca-83ae-4ba7-9f83-79e483b81a97	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	2629	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:25:27.33853+00	2025-12-19 16:25:27.33853+00
+139fc912-8933-4a1c-b594-f9a1c21d5194	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2647	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:26:25.19178+00	2025-12-19 16:26:25.19178+00
+e7dd29b5-3853-4323-b033-9910e1df96e5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2646	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:26:26.291118+00	2025-12-19 16:26:26.291118+00
+0603276f-73de-46b4-aace-5715bf8ac85f	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	2652	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:27:08.534881+00	2025-12-19 16:27:08.534881+00
+aa2abfbe-4b3c-4f0f-9aa0-7c0e7ef7126d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2715	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:29:19.558069+00	2025-12-19 16:29:19.558069+00
+d3fc95f8-4c7f-4aab-b2d2-e2fd53293733	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2919	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:37:48.350915+00	2025-12-19 16:37:48.350915+00
+8772d9aa-30f4-4ccf-9f4d-80a8561844e8	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	2967	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:39:09.266613+00	2025-12-19 16:39:09.266613+00
+d7770289-3a36-415e-9a87-ab2a6d1ddfa2	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3005	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:40:10.386874+00	2025-12-19 16:40:10.386874+00
+684500b2-7edd-49d3-a7ef-c337f9589e2b	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	3038	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:41:15.221646+00	2025-12-19 16:41:15.221646+00
+29e53c7d-7043-448f-9b8d-0be90e18974f	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3046	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:41:40.028503+00	2025-12-19 16:41:40.028503+00
+75f78d4d-4cc8-4b09-90b9-5eb452faab49	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3094	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:45:35.330812+00	2025-12-19 16:45:35.330812+00
+e7faa734-de28-4b53-acb5-88f03d247be5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3139	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:47:42.8676+00	2025-12-19 16:47:42.8676+00
+22b62aee-4b84-4a8d-b522-0db2e9648c09	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3165	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:51:08.092208+00	2025-12-19 16:51:08.092208+00
+ef1970e1-5f6a-4c4c-bac7-3844dd4c1743	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3194	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:51:29.595164+00	2025-12-19 16:51:29.595164+00
+befc6986-3179-4742-a7a3-8234450bb2b6	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3194	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:51:41.782367+00	2025-12-19 16:51:41.782367+00
+9a80f00b-380c-42c4-afe8-f42674feaceb	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3194	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:51:58.559222+00	2025-12-19 16:51:58.559222+00
+d65b69a6-4ab1-432a-9ca6-f679bc2f5205	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	3241	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:52:35.88623+00	2025-12-19 16:52:35.88623+00
+3b7fc6b5-fcbe-4b5f-afcb-3fc025ba7977	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	3241	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:52:46.748588+00	2025-12-19 16:52:46.748588+00
+2bbbecbc-ca1f-4f84-a0d7-46c67819a8ea	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	3241	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:52:57.848277+00	2025-12-19 16:52:57.848277+00
+7ece4c79-2760-4528-a4e8-60ef2ad51a2b	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3264	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:53:19.852884+00	2025-12-19 16:53:19.852884+00
+76135dab-990b-429a-bfb0-51ac90f25244	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3267	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:53:28.92953+00	2025-12-19 16:53:28.92953+00
+812e5972-2453-421c-b4c5-6fb0dd26a526	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3269	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:53:32.340957+00	2025-12-19 16:53:32.340957+00
+30474b5f-1df4-45f6-94da-40c4588c26e4	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3277	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:53:48.453881+00	2025-12-19 16:53:48.453881+00
+ead403e0-1edf-4bc4-886c-62e4eedd954e	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	3278	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:54:06.363996+00	2025-12-19 16:54:06.363996+00
+ccf1b052-46ca-4a2d-9618-15e0f3d7635b	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	3278	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:56:57.765703+00	2025-12-19 16:56:57.765703+00
+5db05251-eecf-4a3d-807a-e0989131d46b	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3355	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:57:50.24803+00	2025-12-19 16:57:50.24803+00
+d67a9af9-0e66-4062-a43e-9a5189949530	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3383	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 16:59:32.148982+00	2025-12-19 16:59:32.148982+00
+2f6a2c02-7334-414c-bbed-204c817892ee	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	3278	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:00:48.318921+00	2025-12-19 17:00:48.318921+00
+27013fd3-8d60-4cc3-aab8-962f66daa39c	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3439	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:02:19.063701+00	2025-12-19 17:02:19.063701+00
+b1bf7b13-c49d-4aa4-99e9-84f7a4f86f8e	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3497	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:04:31.14932+00	2025-12-19 17:04:31.14932+00
+06eb8a75-8b3b-4742-a653-12c86111f970	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3498	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:04:39.333658+00	2025-12-19 17:04:39.333658+00
+b58f7680-fa17-4113-b445-11855bbd0817	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3539	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:06:36.79233+00	2025-12-19 17:06:36.79233+00
+4307e19e-65db-4e80-aa0d-838c5484ee76	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3563	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:07:11.125567+00	2025-12-19 17:07:11.125567+00
+00b90967-5803-4566-bfae-3d35a64b9a25	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3564	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:07:13.194221+00	2025-12-19 17:07:13.194221+00
+88df102c-3939-4e5e-9480-7063c23b3284	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3563	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:07:31.390066+00	2025-12-19 17:07:31.390066+00
+22d2d13f-3005-45d5-aa6b-26a71fd67f6c	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3579	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:07:32.110641+00	2025-12-19 17:07:32.110641+00
+c9095c95-3877-4ea5-a5e8-dd169dad2131	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3631	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:08:22.323399+00	2025-12-19 17:08:22.323399+00
+f295ca02-12da-462f-ad0a-b0bc2083fcda	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3635	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:08:26.498895+00	2025-12-19 17:08:26.498895+00
+1600feef-990d-499c-af00-f361ee731705	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3712	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:11:55.397411+00	2025-12-19 17:11:55.397411+00
+2ffd3244-d2e2-470d-9e58-ceb7d2adb562	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3734	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:13:19.416129+00	2025-12-19 17:13:19.416129+00
+e3bee0b3-7bfb-4325-bfcf-5127da6bcdf8	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	3278	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:13:43.729241+00	2025-12-19 17:13:43.729241+00
+8581594d-83bc-43df-9d45-601f55e9f048	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3742	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:13:52.703882+00	2025-12-19 17:13:52.703882+00
+35412504-4fab-44f9-9cd1-b0a5f68bdb55	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3747	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:14:14.391088+00	2025-12-19 17:14:14.391088+00
+81067c1d-57a2-4d5b-9b52-715f2ca91128	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	3749	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 17:14:16.306713+00	2025-12-19 17:14:16.306713+00
+a0625120-7acd-429a-b8a2-d1c437df38fe	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	38	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:42:57.178706+00	2025-12-19 21:42:57.178706+00
+eea71174-9922-4327-8d6a-496044d64fc1	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	46	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:43:08.906165+00	2025-12-19 21:43:08.906165+00
+ff09c1f5-14a0-4e60-955c-049fa896ec0f	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	48	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:43:21.606793+00	2025-12-19 21:43:21.606793+00
+9ee54036-0f87-42fb-8825-5ef5cca9a5d1	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	78	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:44:34.222136+00	2025-12-19 21:44:34.222136+00
+dd97357c-08e6-41e5-8f2b-166c8995f772	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	87	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:45:02.120323+00	2025-12-19 21:45:02.120323+00
+590e7513-e39d-40db-8f93-dfffe0279ce5	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	98	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:45:13.551231+00	2025-12-19 21:45:13.551231+00
+911a4d6a-17a3-4a77-aca7-75ebdd4595f1	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	123	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:46:00.605756+00	2025-12-19 21:46:00.605756+00
+8e479ece-a55b-477e-a922-2de9809794f3	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	127	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:46:07.908414+00	2025-12-19 21:46:07.908414+00
+e55f5f46-5ab5-4561-b217-cb23700aad93	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	130	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:46:21.665325+00	2025-12-19 21:46:21.665325+00
+4e4572b1-1d47-4f9d-918c-39b964287585	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	149	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:46:49.603005+00	2025-12-19 21:46:49.603005+00
+b020dae5-7269-408e-91eb-74261b707c6d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	176	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:47:23.153604+00	2025-12-19 21:47:23.153604+00
+3c12968a-e71b-4ee9-8a6a-9f83e3718d52	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	255	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:52:28.204379+00	2025-12-19 21:52:28.204379+00
+dc656572-3b21-4e2f-bf47-8e08b1c66cf1	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	268	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:52:54.623281+00	2025-12-19 21:52:54.623281+00
+111726d2-da4f-43cf-b4fa-c6a5d198c2c8	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	270	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:52:59.017628+00	2025-12-19 21:52:59.017628+00
+a753df4e-23fb-4fe9-b13c-55c63bf1f5e2	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	367	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 21:56:25.863962+00	2025-12-19 21:56:25.863962+00
+0883846c-bfaa-4a2a-b9ba-810c226a6411	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	532	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:01:15.098576+00	2025-12-19 22:01:15.098576+00
+f5e9a0f3-59e9-4240-815b-988725527a92	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	537	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:01:42.228273+00	2025-12-19 22:01:42.228273+00
+a69abeaf-c112-4f6a-ae2b-99c14a8d4be9	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	557	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:04:24.692985+00	2025-12-19 22:04:24.692985+00
+dcff04bd-0596-4762-bfa8-7dc6eaac2f6a	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	560	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:04:40.629178+00	2025-12-19 22:04:40.629178+00
+b793b209-eb15-4166-8e22-d8f4882253bc	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	581	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:08:07.988842+00	2025-12-19 22:08:07.988842+00
+8bc60939-5fa9-487c-a949-c13bf2276faf	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	584	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:08:13.470856+00	2025-12-19 22:08:13.470856+00
+206a38f3-d5b1-42fa-b964-d3d3d029c691	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	585	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:08:13.594983+00	2025-12-19 22:08:13.594983+00
+1fa50b53-313c-4d6a-98e8-6f5dfc1a3727	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	599	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:10:22.524811+00	2025-12-19 22:10:22.524811+00
+2b1a1102-072d-4832-948b-bcf02876590d	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	615	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:12:16.042567+00	2025-12-19 22:12:16.042567+00
+24f7afdf-74a9-45a5-a441-0314fefc7f53	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	639	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:14:32.490624+00	2025-12-19 22:14:32.490624+00
+1948dfb1-253d-47e9-9c11-7719e8c756a9	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	690	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:19:09.176007+00	2025-12-19 22:19:09.176007+00
+a0efaaa1-381b-4f6b-9678-cfe6cda2236b	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	695	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:19:49.937557+00	2025-12-19 22:19:49.937557+00
+3006fad4-19ca-4bf7-af62-7d0a77ff36d2	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	696	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:20:17.501971+00	2025-12-19 22:20:17.501971+00
+172ec78e-cb5e-4daa-80b1-360dc59e6637	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	697	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:20:22.577701+00	2025-12-19 22:20:22.577701+00
+aa250761-584a-4bc8-b3a9-96e195cd51af	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	698	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:20:27.111552+00	2025-12-19 22:20:27.111552+00
+1c4ebfaa-615d-4140-96c7-ad4502a52834	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	700	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:20:28.699721+00	2025-12-19 22:20:28.699721+00
+42bcbef1-4144-44aa-8815-27f4f493a45d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	720	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:21:35.592119+00	2025-12-19 22:21:35.592119+00
+6854301e-4151-4ace-aa7b-bffbc93243d8	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	726	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:22:50.474681+00	2025-12-19 22:22:50.474681+00
+b850bae7-e637-4c66-a300-51ae1788abe5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	739	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:23:46.61483+00	2025-12-19 22:23:46.61483+00
+765bef85-ec96-4357-ab03-1e21e69e4c70	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	753	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:24:57.151882+00	2025-12-19 22:24:57.151882+00
+195541dc-86f1-4346-81da-eae9b4440332	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	771	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:26:57.125331+00	2025-12-19 22:26:57.125331+00
+8e7737ce-66aa-40b2-bd8b-d4b8994345f8	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	777	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:29:39.348011+00	2025-12-19 22:29:39.348011+00
+3c760de1-ed75-4f69-bd81-208f6a14faa7	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	778	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:29:43.375159+00	2025-12-19 22:29:43.375159+00
+747fc274-ecde-461d-a1e1-44595f56f588	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	777	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:29:49.367455+00	2025-12-19 22:29:49.367455+00
+6e8f80b6-b32f-4813-a412-7f7b9024ebc5	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	777	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:29:59.587483+00	2025-12-19 22:29:59.587483+00
+cd88e71e-f5ce-4806-acb1-f8b5d4df622d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	796	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:39:28.778736+00	2025-12-19 22:39:28.778736+00
+6f8f1629-6850-4a0f-a26b-1475df5a1694	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	797	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:39:30.784997+00	2025-12-19 22:39:30.784997+00
+94c1879f-589a-4da0-9b3e-0cc152afc298	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	806	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:40:08.20868+00	2025-12-19 22:40:08.20868+00
+2fec8d84-ee8e-4328-b8ad-f39196f29198	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	833	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:42:23.195328+00	2025-12-19 22:42:23.195328+00
+2db4f25d-250d-48e2-93e0-a2d9a49ae0e2	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	871	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:54:02.717196+00	2025-12-19 22:54:02.717196+00
+4b8e2dad-969e-4f4b-894a-b3b0051115fb	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	872	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 22:59:17.784423+00	2025-12-19 22:59:17.784423+00
+802b6ea2-bdec-46cc-9e11-6168941fcd6b	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	906	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 23:13:58.405012+00	2025-12-19 23:13:58.405012+00
+6b36032e-2725-4a8d-a1d5-27f783a90d0a	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	931	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 23:31:21.471486+00	2025-12-19 23:31:21.471486+00
+5d8989cb-304b-49a7-8a32-bab44aa0bff9	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	932	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 23:45:35.025269+00	2025-12-19 23:45:35.025269+00
+94d47cf8-00fb-496e-a763-78559285963a	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	937	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 23:46:47.212129+00	2025-12-19 23:46:47.212129+00
+2fbdff97-585d-4f03-9528-df498adb76e5	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	956	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 23:59:36.463549+00	2025-12-19 23:59:36.463549+00
+08755821-5f70-4ffa-b54f-6f2c2a198a66	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	957	\N	\N	\N	\N	HIGH	PENDING	2025-12-19 23:59:43.460474+00	2025-12-19 23:59:43.460474+00
+1b9b3b93-3be2-467d-bba3-d4e325cb86a6	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	967	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 00:35:51.285999+00	2025-12-20 00:35:51.285999+00
+7db87201-0b7a-4b73-9ece-40e68c7928a7	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	968	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 00:35:59.466391+00	2025-12-20 00:35:59.466391+00
+3af52c60-6a4e-4ba3-966e-593223229535	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	969	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 00:38:33.208713+00	2025-12-20 00:38:33.208713+00
+8d833be8-1ce1-466d-b714-c293cec836c9	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	967	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 00:38:38.568473+00	2025-12-20 00:38:38.568473+00
+0151c189-dfe1-40e9-88cc-07a6bcb1b9fd	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	977	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 00:54:50.777536+00	2025-12-20 00:54:50.777536+00
+8669193d-64e2-41b7-ba37-0bcd9b67dabf	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	984	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 00:58:49.795471+00	2025-12-20 00:58:49.795471+00
+8a24e447-6742-4278-9fdc-4dd218480bdc	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	979	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:05:09.203805+00	2025-12-20 02:05:09.203805+00
+edb04aec-cf3d-4302-8373-1a2ce504e417	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	992	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:05:56.930781+00	2025-12-20 02:05:56.930781+00
+2f3ec542-265b-4001-a5ab-e01f1b750bb5	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	995	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:05:59.660583+00	2025-12-20 02:05:59.660583+00
+ff8e2ede-6ec9-4397-bcba-31d717dd79b6	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	995	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:06:11.095622+00	2025-12-20 02:06:11.095622+00
+9f524aac-cce4-41fe-88f0-ea59aea05ebc	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	995	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:06:21.842387+00	2025-12-20 02:06:21.842387+00
+deeed210-890b-4a08-a0bd-a5b52993870b	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	995	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:06:32.695806+00	2025-12-20 02:06:32.695806+00
+a29d76d8-a55c-459c-a08f-6df007e78b39	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	995	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:06:44.225091+00	2025-12-20 02:06:44.225091+00
+e4bbf476-960c-47eb-af2c-0a07fa86446e	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	995	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:06:54.571308+00	2025-12-20 02:06:54.571308+00
+01bc55cd-561d-40e7-99e2-fb101926b201	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	995	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:07:05.540577+00	2025-12-20 02:07:05.540577+00
+b812b95a-b442-441a-9d47-e972aeeeeb33	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	996	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:07:12.056859+00	2025-12-20 02:07:12.056859+00
+46065046-495d-4a53-97b2-4ae1a013fed5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1007	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:22:38.407898+00	2025-12-20 02:22:38.407898+00
+67df2454-3dea-4413-837f-921f575c551d	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1021	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:56:49.988218+00	2025-12-20 02:56:49.988218+00
+d1553315-797d-4e61-9f68-b071fc8cd1d9	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1025	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 02:58:15.025978+00	2025-12-20 02:58:15.025978+00
+38bed54e-308a-4314-bf19-416442bc69d5	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1056	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 03:32:22.223412+00	2025-12-20 03:32:22.223412+00
+f494179a-7d61-43d9-8ff3-1382d1e30c31	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1059	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 03:36:57.255403+00	2025-12-20 03:36:57.255403+00
+4c96d52e-b6fb-4a03-9b61-f78d1a1f6eee	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1061	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 03:37:32.712342+00	2025-12-20 03:37:32.712342+00
+3b325817-e629-4d59-a05d-d7f5dedd1482	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1091	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 03:48:54.942907+00	2025-12-20 03:48:54.942907+00
+7607e040-2bb8-4cd0-9257-200f88239287	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1101	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 04:24:18.854268+00	2025-12-20 04:24:18.854268+00
+3d5aff3f-a045-4e52-839c-674b65162d35	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1102	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 05:23:17.173274+00	2025-12-20 05:23:17.173274+00
+57d13f8b-ad7f-48da-b2bb-6d0a599ace80	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1105	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 05:28:57.400718+00	2025-12-20 05:28:57.400718+00
+d7e6d775-d470-4c84-9ab6-0b9c5c1fddb3	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1106	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 06:22:57.59707+00	2025-12-20 06:22:57.59707+00
+17da5e44-5888-4891-a923-cff9904b3d93	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1108	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 06:39:11.169173+00	2025-12-20 06:39:11.169173+00
+48e36fce-da4e-4ec2-b82c-c318864d3b81	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 06:43:25.757209+00	2025-12-20 06:43:25.757209+00
+e1f72f42-6d27-4548-b009-050eb142dc0e	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 06:45:44.127598+00	2025-12-20 06:45:44.127598+00
+e5d6090f-54d7-4375-84c5-967c28bcf473	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 06:47:13.150944+00	2025-12-20 06:47:13.150944+00
+f42130b9-6f4d-457a-a0f6-7a0a5f9cea76	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1110	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 06:53:46.787345+00	2025-12-20 06:53:46.787345+00
+d25f7b7c-d5a1-4dc8-812d-55a7a042b7bd	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 06:53:47.517529+00	2025-12-20 06:53:47.517529+00
+49de92d6-dbb7-4359-9e6a-eb378261fb43	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1119	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 07:48:53.605552+00	2025-12-20 07:48:53.605552+00
+0579434a-d5f7-487f-9222-8870b7951f11	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1121	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 08:08:30.962759+00	2025-12-20 08:08:30.962759+00
+ab373a12-f296-4e63-a2bd-60853a14701c	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 08:38:42.716502+00	2025-12-20 08:38:42.716502+00
+1189d986-87fa-4597-bd42-4441b9684b3f	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1110	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 08:38:47.093502+00	2025-12-20 08:38:47.093502+00
+0974f622-5deb-4177-b5ff-1efa01046ec6	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1112	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 08:39:47.266901+00	2025-12-20 08:39:47.266901+00
+ea303c4b-b6ed-4a1f-9ce7-2d13a1e568f0	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 08:39:50.959331+00	2025-12-20 08:39:50.959331+00
+08577b9c-6705-417f-b0cb-20c04867ff54	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1121	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 09:03:23.105899+00	2025-12-20 09:03:23.105899+00
+74d6b435-d428-4098-837c-6c8087f71669	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1125	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 09:15:20.561605+00	2025-12-20 09:15:20.561605+00
+25547d10-8550-400f-94c3-e4d654d1a440	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 09:32:05.358443+00	2025-12-20 09:32:05.358443+00
+f28971d1-d60b-45b7-aa88-8f58fbb61cbb	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 09:36:26.751493+00	2025-12-20 09:36:26.751493+00
+7e8c1a42-c651-47c4-a096-eeaa94912ca0	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1109	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:32:52.117302+00	2025-12-20 10:32:52.117302+00
+9f87590f-b281-43c0-aaeb-aa186eda68d0	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1174	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:32:56.792799+00	2025-12-20 10:32:56.792799+00
+fd9d00a3-55b5-44be-8fb1-2dc2254542ca	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1177	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:44:31.122504+00	2025-12-20 10:44:31.122504+00
+cf0163a6-4eb3-446b-aec4-178c0c7d86d3	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1178	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:44:38.57771+00	2025-12-20 10:44:38.57771+00
+b835fc90-9b0d-42d4-b4b3-ef1b5fc40f9c	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1181	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:46:45.687491+00	2025-12-20 10:46:45.687491+00
+44f89175-fc92-4bba-a004-d05cca9b2feb	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1182	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:46:49.823089+00	2025-12-20 10:46:49.823089+00
+66134815-2cca-4e61-806b-007d48265fec	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1183	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:46:54.458656+00	2025-12-20 10:46:54.458656+00
+dfa30a94-4e58-4977-a561-5dcf8ecbe9f8	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1183	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:47:06.079903+00	2025-12-20 10:47:06.079903+00
+dd060499-b0c5-4c71-9e21-8235e11e631f	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1183	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:47:16.497563+00	2025-12-20 10:47:16.497563+00
+b1321b5c-365d-4fb0-b416-ac51a0cc835f	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1183	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 10:55:23.631439+00	2025-12-20 10:55:23.631439+00
+67a83c5c-69ff-47c2-8044-102669263045	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 11:29:28.622926+00	2025-12-20 11:29:28.622926+00
+a923685c-5f99-4591-87a9-f9f316587c61	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 11:29:38.645478+00	2025-12-20 11:29:38.645478+00
+4325450f-09bf-4205-b3c4-6736950d57ba	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 11:44:53.444185+00	2025-12-20 11:44:53.444185+00
+3e9e33f0-aab6-419e-a044-73d23472e028	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 12:18:36.999766+00	2025-12-20 12:18:36.999766+00
+f76ea24d-3776-4005-bf65-b207560176f8	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 12:25:06.654894+00	2025-12-20 12:25:06.654894+00
+dd1f3236-b700-40c1-a3dd-8e2699ebb2c4	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 12:25:16.973815+00	2025-12-20 12:25:16.973815+00
+26184f21-a1bd-4953-a6ec-594e64ff60e2	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 12:25:35.982808+00	2025-12-20 12:25:35.982808+00
+ef1f1fce-8c1d-465c-a9d8-934fa25e57d5	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 12:25:54.850805+00	2025-12-20 12:25:54.850805+00
+3d07173a-164b-444c-82b7-225656fdfde4	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1255	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 14:03:17.49186+00	2025-12-20 14:03:17.49186+00
+30ea9f50-86bf-4cf5-b3c7-9d7262251d2f	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1255	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 14:03:27.726149+00	2025-12-20 14:03:27.726149+00
+12a0146e-fe69-4b16-9782-9f44a3745299	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 14:23:55.457353+00	2025-12-20 14:23:55.457353+00
+89aabba0-e567-4364-8b26-cd39de067021	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1261	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 14:24:03.187119+00	2025-12-20 14:24:03.187119+00
+594e52d9-a8c7-4701-bcbb-63c4878b7ab0	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1201	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 14:26:48.744598+00	2025-12-20 14:26:48.744598+00
+81b00573-178a-4b3a-b255-3b56b8907df6	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1262	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 14:26:51.287446+00	2025-12-20 14:26:51.287446+00
+d9f7518e-17e4-4928-86ad-7192fbb7d168	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1289	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 16:24:36.197941+00	2025-12-20 16:24:36.197941+00
+92ed6eeb-b42a-416b-a9fa-3ba299c484b3	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1295	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 16:29:14.862477+00	2025-12-20 16:29:14.862477+00
+b72c7f5f-0d8c-4b92-b67b-2534b1296e66	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1309	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 17:12:37.888183+00	2025-12-20 17:12:37.888183+00
+68ea04a3-db62-460f-abc4-4cf31165253a	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1312	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 17:15:16.482121+00	2025-12-20 17:15:16.482121+00
+5e93b319-d1bb-4d2d-91f5-e64e5520d4a9	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1313	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 17:15:19.637561+00	2025-12-20 17:15:19.637561+00
+02e9414c-4dad-4762-b66a-23cdcfea05d3	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1320	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 17:50:38.362976+00	2025-12-20 17:50:38.362976+00
+d5b528b9-a695-4ed4-913f-e58e31bb4763	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1336	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 18:25:36.647322+00	2025-12-20 18:25:36.647322+00
+548d857f-1559-46c1-b859-5ff953d42c96	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1341	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 18:32:27.61773+00	2025-12-20 18:32:27.61773+00
+1cc64fe2-c777-4a4a-8e2a-30e0adf7efc7	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1313	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 19:01:59.673808+00	2025-12-20 19:01:59.673808+00
+12ef69f4-664e-4773-bd11-63f55b05c0e8	cc9a1778-56aa-4bad-9b68-7a8ec5b5c316	\N	intrusion	1354	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 19:05:20.88936+00	2025-12-20 19:05:20.88936+00
+6eb06175-d745-4031-9df2-49b52faaa250	1440355a-412f-41fe-a430-8f6b0390f27b	\N	intrusion	1376	\N	\N	\N	\N	HIGH	PENDING	2025-12-20 19:52:45.089273+00	2025-12-20 19:52:45.089273+00
+\.
+
+
+--
+-- Data for Name: faces; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.faces (id, name, created_at) FROM stdin;
+\.
+
+
+--
+-- Data for Name: org_zones; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.org_zones (id, organization_id, slug, name, location_description, geo_bounds, is_active, created_at, updated_at) FROM stdin;
+91b428cb-30c1-400c-b49f-2a007484fc9a	771247e7-ed96-49c2-8d64-a939f99542a1	zona-default	Zona Default	Zona por defecto para migración de cámaras existentes	\N	t	2025-12-19 18:17:50.95319+00	2025-12-19 18:17:50.95319+00
+030fb874-0199-4a60-b2d2-6cf7e984b195	0f89f159-c10d-4710-8787-c0d76c5f0849	bodega-principal	Bodega Principal	Bodega principal en el primer piso	null	t	2025-12-19 19:10:41.702333+00	2025-12-19 19:10:41.702333+00
+\.
+
+
+--
+-- Data for Name: organizations; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.organizations (id, slug, name, is_managed, config, is_active, created_at, updated_at) FROM stdin;
+771247e7-ed96-49c2-8d64-a939f99542a1	vigias-local	Vigías Local	f	{}	t	2025-12-19 18:17:46.297384+00	2025-12-19 18:17:46.297384+00
+0f89f159-c10d-4710-8787-c0d76c5f0849	mi-empresa	Mi Empresa S.A.	f	{}	t	2025-12-19 19:10:24.094768+00	2025-12-19 19:10:24.094768+00
+\.
+
+
+--
+-- Data for Name: permissions; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.permissions (id, slug, description) FROM stdin;
+\.
+
+
+--
+-- Data for Name: role_permissions; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.role_permissions (role_id, permission_id) FROM stdin;
+\.
+
+
+--
+-- Data for Name: roles; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.roles (id, code, name, description, is_system_role) FROM stdin;
+\.
+
+
+--
+-- Data for Name: users; Type: TABLE DATA; Schema: public; Owner: user
+--
+
+COPY public.users (id, username, email, password_hash, role_id, full_name, is_active, last_login, created_at, updated_at) FROM stdin;
+\.
+
+
+--
+-- Name: faces_id_seq; Type: SEQUENCE SET; Schema: public; Owner: user
+--
+
+SELECT pg_catalog.setval('public.faces_id_seq', 1, false);
+
+
+--
+-- Name: audit_logs audit_logs_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT audit_logs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: camera_ai_configs camera_ai_configs_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.camera_ai_configs
+    ADD CONSTRAINT camera_ai_configs_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: cameras cameras_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.cameras
+    ADD CONSTRAINT cameras_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: event_actions event_actions_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.event_actions
+    ADD CONSTRAINT event_actions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: events events_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.events
+    ADD CONSTRAINT events_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: faces faces_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.faces
+    ADD CONSTRAINT faces_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: org_zones org_zones_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.org_zones
+    ADD CONSTRAINT org_zones_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: organizations organizations_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: organizations organizations_slug_key; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_slug_key UNIQUE (slug);
+
+
+--
+-- Name: permissions permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.permissions
+    ADD CONSTRAINT permissions_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: permissions permissions_slug_key; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.permissions
+    ADD CONSTRAINT permissions_slug_key UNIQUE (slug);
+
+
+--
+-- Name: role_permissions role_permissions_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_pkey PRIMARY KEY (role_id, permission_id);
+
+
+--
+-- Name: roles roles_code_key; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_code_key UNIQUE (code);
+
+
+--
+-- Name: roles roles_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.roles
+    ADD CONSTRAINT roles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: org_zones unique_zone_per_org; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.org_zones
+    ADD CONSTRAINT unique_zone_per_org UNIQUE (organization_id, slug);
+
+
+--
+-- Name: users users_email_key; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_email_key UNIQUE (email);
+
+
+--
+-- Name: users users_pkey; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: users users_username_key; Type: CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_username_key UNIQUE (username);
+
+
+--
+-- Name: idx_cameras_zone; Type: INDEX; Schema: public; Owner: user
+--
+
+CREATE INDEX idx_cameras_zone ON public.cameras USING btree (zone_id) WHERE (zone_id IS NOT NULL);
+
+
+--
+-- Name: idx_cameras_zone_active; Type: INDEX; Schema: public; Owner: user
+--
+
+CREATE INDEX idx_cameras_zone_active ON public.cameras USING btree (zone_id, is_active);
+
+
+--
+-- Name: idx_org_zones_org; Type: INDEX; Schema: public; Owner: user
+--
+
+CREATE INDEX idx_org_zones_org ON public.org_zones USING btree (organization_id) WHERE (is_active = true);
+
+
+--
+-- Name: idx_org_zones_slug; Type: INDEX; Schema: public; Owner: user
+--
+
+CREATE INDEX idx_org_zones_slug ON public.org_zones USING btree (organization_id, slug);
+
+
+--
+-- Name: idx_organizations_active; Type: INDEX; Schema: public; Owner: user
+--
+
+CREATE INDEX idx_organizations_active ON public.organizations USING btree (is_active);
+
+
+--
+-- Name: idx_organizations_slug; Type: INDEX; Schema: public; Owner: user
+--
+
+CREATE INDEX idx_organizations_slug ON public.organizations USING btree (slug) WHERE (is_active = true);
+
+
+--
+-- Name: org_zones update_org_zones_modtime; Type: TRIGGER; Schema: public; Owner: user
+--
+
+CREATE TRIGGER update_org_zones_modtime BEFORE UPDATE ON public.org_zones FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- Name: organizations update_organizations_modtime; Type: TRIGGER; Schema: public; Owner: user
+--
+
+CREATE TRIGGER update_organizations_modtime BEFORE UPDATE ON public.organizations FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- Name: audit_logs audit_logs_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.audit_logs
+    ADD CONSTRAINT audit_logs_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: camera_ai_configs camera_ai_configs_camera_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.camera_ai_configs
+    ADD CONSTRAINT camera_ai_configs_camera_id_fkey FOREIGN KEY (camera_id) REFERENCES public.cameras(id) ON DELETE CASCADE;
+
+
+--
+-- Name: cameras cameras_zone_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.cameras
+    ADD CONSTRAINT cameras_zone_id_fkey FOREIGN KEY (zone_id) REFERENCES public.org_zones(id) ON DELETE CASCADE;
+
+
+--
+-- Name: event_actions event_actions_event_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.event_actions
+    ADD CONSTRAINT event_actions_event_id_fkey FOREIGN KEY (event_id) REFERENCES public.events(id) ON DELETE CASCADE;
+
+
+--
+-- Name: event_actions event_actions_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.event_actions
+    ADD CONSTRAINT event_actions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id);
+
+
+--
+-- Name: events events_camera_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.events
+    ADD CONSTRAINT events_camera_id_fkey FOREIGN KEY (camera_id) REFERENCES public.cameras(id) ON DELETE SET NULL;
+
+
+--
+-- Name: events events_config_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.events
+    ADD CONSTRAINT events_config_id_fkey FOREIGN KEY (config_id) REFERENCES public.camera_ai_configs(id);
+
+
+--
+-- Name: org_zones org_zones_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.org_zones
+    ADD CONSTRAINT org_zones_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: role_permissions role_permissions_permission_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_permission_id_fkey FOREIGN KEY (permission_id) REFERENCES public.permissions(id) ON DELETE CASCADE;
+
+
+--
+-- Name: role_permissions role_permissions_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.role_permissions
+    ADD CONSTRAINT role_permissions_role_id_fkey FOREIGN KEY (role_id) REFERENCES public.roles(id) ON DELETE CASCADE;
+
+
+--
+-- Name: users users_role_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: user
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_role_id_fkey FOREIGN KEY (role_id) REFERENCES public.roles(id);
+
+
+--
+-- PostgreSQL database dump complete
+--
+
+\unrestrict EhTFUkEHiqtzsnNneZVtO8F81Z3v8fhVl20lvsSDqTEZ8Tqn3Ug1UGUf7nxGaLW
+

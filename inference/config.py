@@ -25,10 +25,20 @@ class Config:
     PPHUMAN_SMOKING_MODEL_DIR = "/app/weights/ppyoloe_crn_s_80e_smoking_visdrone"
     PPHUMAN_CALLING_MODEL_DIR = "/app/weights/PPHGNet_tiny_calling_halfbody"
     
-    INSIGHTFACE_MODEL_NAME = "buffalo_l"
+    FACE_DET_MODEL_PATH = os.getenv("FACE_DET_MODEL_PATH", "/app/weights/face_detection_yunet_2023mar.onnx")
+    FACE_REC_MODEL_PATH = os.getenv("FACE_REC_MODEL_PATH", "/app/weights/ghostfacenetv2.onnx")
+    
+    # Face Detection Config (YuNet)
+    FACE_DET_SCORE_THRESHOLD = 0.6
+    FACE_DET_NMS_THRESHOLD = 0.3
+    FACE_DET_TOP_K = 5000
     
     # Logic
     SIMILARITY_THRESHOLD = 0.85 
+
+    # Optimization
+    USE_TENSORRT = os.getenv("USE_TENSORRT", "true").lower() == "true"
+    TENSORRT_PRECISION = os.getenv("TENSORRT_PRECISION", "fp16") # fp16, fp32, int8 
 
     # Defaults
     DEFAULT_DET_CONFIDENCE = 0.5

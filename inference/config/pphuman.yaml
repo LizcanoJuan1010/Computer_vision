@@ -20,7 +20,7 @@ ID_BASED_DETACTION:
   threshold: 0.3
   display_frames: 80
   skip_frame_num: 2
-  enable: False # Enabled dynamically in code
+  enable: True # Enabled dynamically in code
 
 # Calling/Phoning Detection configuration
 ID_BASED_CLSACTION:
@@ -29,4 +29,18 @@ ID_BASED_CLSACTION:
   threshold: 0.8
   display_frames: 80
   skip_frame_num: 2
-  enable: False # Enabled dynamically in code
+  enable: True # Enabled dynamically in code
+
+  # FALTA ESTO PARA PELEAS
+VIDEO_ACTION:
+  model_dir: /app/weights/pptsm_fight_detection  # Modelo específico de peleas
+  batch_size: 1
+  enable: True
+  frame_len: 8   # Cuantos frames analiza para decidir si es pelea
+  sample_freq: 4 # Cada cuanto toma un frame
+
+# FALTA ESTO PARA FORENSE (REID)
+REID:
+  model_dir: /app/weights/reid_model # Modelo que convierte la imagen de la persona en vectores matemáticos únicos
+  batch_size: 16
+  enable: True

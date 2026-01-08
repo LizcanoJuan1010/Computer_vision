@@ -4,7 +4,7 @@ OCSORTTracker:
   vertical_ratio: -1
   match_thres: 0.4
   conf_thres: 0.3 # match my debug threshold
-  track_buffer: 30
+  track_buffer: 60 # Increased to handle occlusions better (approx 2s at 30fps)
   min_track_score: 0.4
   det_thresh_remain: 0.5
   use_byte: False

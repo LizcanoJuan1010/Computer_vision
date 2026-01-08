@@ -108,10 +108,22 @@ services:
       - DB_USER=user
       - DB_PASSWORD=password
       - DB_NAME=vigias
+      # Hikvision RTSP Auth (Replacements)
+      - HIK_USER=${HIK_USER}
+      - HIK_PASS=${HIK_PASS}
+      - HIK_IP=${HIK_IP}
+      - PORT_RTSP=${PORT_RTSP}
       # Face Cache Configuration (LFU Hybrid)
       - FACE_CACHE_ENABLED=true
       - FACE_CACHE_L1_CAPACITY=1000
       - SIMILARITY_THRESHOLD=0.85
+      # Optimization
+      - USE_TENSORRT=true
+      - USE_TENSORRT=true
+      - TENSORRT_PRECISION=fp16
+      # Performance Tuning
+      - BATCH_SIZE=4
+      - BATCH_TIMEOUT=0.005
       # NVIDIA Support
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility

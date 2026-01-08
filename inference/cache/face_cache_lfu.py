@@ -96,14 +96,14 @@ class FaceCacheLFU:
             SELECT id, name, embedding, organization_id
             FROM faces
             WHERE category = 'BLACKLIST'
-              AND share_to_global_blacklist = TRUE
               AND embedding IS NOT NULL
         """
 
         # Execute query synchronously via thread pool
         def _fetch():
-            db.cur.execute(query)
-            return db.cur.fetchall()
+            with db.conn.cursor() as cur:
+                cur.execute(query)
+                return cur.fetchall()
 
         result = await asyncio.to_thread(_fetch)
 
@@ -158,13 +158,14 @@ class FaceCacheLFU:
             FROM faces
             WHERE organization_id = %s
               AND embedding IS NOT NULL
-              AND (category != 'BLACKLIST' OR share_to_global_blacklist = FALSE)
+              AND category != 'BLACKLIST' 
         """
-
+        
         # Execute query synchronously via thread pool
         def _fetch():
-            db.cur.execute(query, (org_id,))
-            return db.cur.fetchall()
+            with db.conn.cursor() as cur:
+                cur.execute(query, (org_id,))
+                return cur.fetchall()
 
         result = await asyncio.to_thread(_fetch)
 

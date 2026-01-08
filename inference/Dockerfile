@@ -1,13 +1,17 @@
 # Dockerfile para Inference Service (YOLO + InsightFace + LPR)
-# Requiere NVIDIA GPU con CUDA 12.2+
+# Requiere NVIDIA GPU con CUDA 11.8 + CUDNN 8 (PaddlePaddle compatible)
 
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 
 # Evitar prompts interactivos
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Instalar dependencias del sistema
+# NVIDIA CUDNN Path Fix
+# NVIDIA CUDNN Path Fix - Include pip installed nvidia libs
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64:/usr/local/cuda/targets/x86_64-linux/lib/:/usr/local/lib/python3.11/dist-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/dist-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/dist-packages/nvidia/cuda_runtime/lib
+
+# 2. Configurar entorno y dependencias sistema
 RUN apt-get update && apt-get install -y \
     python3.11 \
     python3-pip \
@@ -22,11 +26,13 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    libgomp1 \
+    libnvinfer8 \
+    libnvinfer-plugin8 \
     && rm -rf /var/lib/apt/lists/*
 
-# Symlink python3.11 a python
-RUN ln -sf /usr/bin/python3.11 /usr/bin/python
+# Configurar Python 3.11 como default (incluyendo python3)
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python3
 
 # Install pip for Python 3.11
 RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11
@@ -36,15 +42,16 @@ WORKDIR /app
 # Copiar requirements
 COPY requirements.txt .
 
-# Instalar PyTorch con CUDA
-RUN python -m pip install --no-cache-dir \
-    torch==2.9.1 \
-    torchvision==0.24.1 \
-    --index-url https://download.pytorch.org/whl/cu128
+# Skip Torch install - Using ONNX Runtime for Face and Paddle for Human
 
 # Instalar dependencias Python
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
+# Configurar LD_LIBRARY_PATH y Symlinks para CUDA/TRT
+# Ensure libcudnn.so symlink exists (required by some Paddle ops)
+RUN ln -sf /usr/lib/x86_64-linux-gnu/libcudnn.so.8 /usr/lib/x86_64-linux-gnu/libcudnn.so
+
+ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/lib/x86_64-linux-gnu:/usr/local/lib/python3.11/dist-packages/nvidia/cudnn/lib:/usr/local/lib/python3.11/dist-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/dist-packages/nvidia/cufft/lib:/usr/local/lib/python3.11/dist-packages/nvidia/curand/lib:/usr/local/lib/python3.11/dist-packages/nvidia/cusolver/lib:/usr/local/lib/python3.11/dist-packages/nvidia/cusparse/lib:/usr/local/lib/python3.11/dist-packages/nvidia/nccl/lib:/usr/local/lib/python3.11/dist-packages/nvidia/nvtx/lib"
 # Install PaddlePaddle GPU (CUDA 11.2+ compatible usually, check matrix)
 # For CUDA 12.x, we might need a specific wheel or use the latest stable.
 # Using 2.6.0 which is stable. 
@@ -63,6 +70,13 @@ RUN git clone -b release/2.8 https://github.com/PaddlePaddle/PaddleDetection.git
     cd /app/PaddleDetection && \
     python -m pip install -r requirements.txt && \
     python -m pip install -e .
+
+# SYSTEM FIX: Patch infer.py to avoid NameError: FLAGS when imported
+# Fixed MockFlags to return empty string instead of None to avoid stat(None) errors
+RUN echo "class MockFlags:\n    def __getattr__(self, name): return \"\"\n    def __bool__(self): return False\nFLAGS = MockFlags()" > /tmp/header.py && \
+    cat /tmp/header.py /app/PaddleDetection/deploy/python/infer.py > /tmp/infer.py && \
+    mv /tmp/infer.py /app/PaddleDetection/deploy/python/infer.py
+
 
 # Fix OpenCV compatibility (AttributeError: cv2.dnn.DictValue) AND NumPy 2.x incompatibility
 # Run AFTER PaddleDetection install to prevent it from upgrading to broken versions
@@ -96,7 +110,17 @@ RUN wget -q https://bj.bcebos.com/v1/paddledet/models/pipeline/ppyoloe_crn_s_80e
 # 5. Use-case: Calling (Classification based)
 RUN wget -q https://bj.bcebos.com/v1/paddledet/models/pipeline/PPHGNet_tiny_calling_halfbody.zip && \
     unzip -q PPHGNet_tiny_calling_halfbody.zip && \
-    rm PPHGNet_tiny_calling_halfbody.zip
+    rm PPHGNet_tiny_calling_halfbody.zip && \
+    # 6. ReID Model (Person Search)
+    wget -q https://bj.bcebos.com/v1/paddledet/models/pipeline/reid_model.zip && \
+    unzip -q reid_model.zip && \
+    rm reid_model.zip
+
+# 7. Video Action (Fight Detection - TSM)
+RUN wget -q https://videotag.bj.bcebos.com/PaddleVideo-release2.3/ppTSM_fight.zip && \
+    unzip -q ppTSM_fight.zip && \
+    mv ppTSM pptsm_fight_detection && \
+    rm ppTSM_fight.zip
 
 # Return to app root
 WORKDIR /app

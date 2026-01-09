@@ -122,7 +122,7 @@ services:
       - USE_TENSORRT=true
       - TENSORRT_PRECISION=fp16
       # Performance Tuning
-      - BATCH_SIZE=4
+      - BATCH_SIZE=1
       - BATCH_TIMEOUT=0.005
       # NVIDIA Support
       - NVIDIA_VISIBLE_DEVICES=all

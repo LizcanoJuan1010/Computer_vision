@@ -15,5 +15,5 @@ PyYAML
 scikit-learn
 pandas
 scipy
-nvidia-dali-cuda110
+
 av

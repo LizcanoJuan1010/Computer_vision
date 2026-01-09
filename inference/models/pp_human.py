@@ -5,52 +5,41 @@ import numpy as np
 import paddle
 from ..config import config
 
+import builtins
+import sys
+
+# SYSTEM FIX: Patch deploy.python.infer to avoid NameError: name 'FLAGS' is not defined
+# The PaddleDetection library uses a global FLAGS variable. We inject it directly into builtins.
+class MockFlags:
+    def __getattr__(self, name):
+        if name == "collect_trt_shape_info": return False
+        if name == "tuned_trt_shape_file": return "tuned_trt_shape.pbtxt"
+        if name == "device": return "GPU"
+        if name == "use_gpu": return True 
+        if name == "prog_file": return "" # Return empty string to avoid stat(None)
+        if name == "params_file": return "" # Return empty string to avoid stat(None)
+        if name == "model_dir": return "." # Return valid path
+        if name == "use_fd_format": return False
+        if name == "run_benchmark": return False
+        if name == "run_mode": return "trt_fp16"
+        print(f"DEBUG: MockFlags requested unknown attribute: {name}", flush=True)
+        return "" # Return empty string to act as False but satisfy path requirements
+        
+mock_flags = MockFlags()
+builtins.FLAGS = mock_flags
+print("DEBUG: Injected global builtins.FLAGS", flush=True)
+
 try:
     # Try importing from the cloned PaddleDetection repo (in Docker PYTHONPATH)
     from deploy.pipeline.pipeline import Pipeline, PipePredictor
     from deploy.python.infer import Detector
     from ppdet.core.workspace import load_config
     # Utils for manual pipeline
-    # Utils for manual pipeline
     from deploy.pipeline.pipe_utils import parse_mot_res, crop_image_with_mot
-    import sys
-    # SYSTEM FIX: Patch deploy.python.infer to avoid NameError: name 'FLAGS' is not defined
-    # The PaddleDetection library uses a global FLAGS variable. We inject it directly into the module dictionary.
-    
-    class MockFlags:
-        def __getattr__(self, name):
-            if name == "collect_trt_shape_info": return False
-            if name == "tuned_trt_shape_file": return "tuned_trt_shape.pbtxt"
-            if name == "device": return "GPU"
-            if name == "use_gpu": return True 
-            if name == "prog_file": return "" # Return empty string to avoid stat(None)
-            if name == "params_file": return "" # Return empty string to avoid stat(None)
-            if name == "model_dir": return "." # Return valid path
-            if name == "use_fd_format": return False
-            if name == "run_benchmark": return False
-            if name == "run_mode": return "trt_fp16"
-            if name == "run_mode": return "trt_fp16"
-            print(f"DEBUG: MockFlags requested unknown attribute: {name}", flush=True)
-            return "" # Return empty string to act as False but satisfy path requirements
-            
-    mock_flags = MockFlags()
-    
-    # Force patch sys.modules to ensure our mock is used even if Dockerfile predefined it
-    for mod_name in ['deploy.python.infer', 'infer', 'deploy.pipeline.pipeline']:
-        if mod_name in sys.modules:
-            print(f"DEBUG: Force Injecting Mock FLAGS into {mod_name}", flush=True)
-            try:
-                setattr(sys.modules[mod_name], 'FLAGS', mock_flags)
-            except Exception as e:
-                print(f"DEBUG: Failed to inject FLAGS into {mod_name}: {e}")
 
-    # Also force set in the local imported module
+    # SYSTEM FIX: Monkeypatch create_predictor to disable IR Optimization
     try:
         import deploy.python.infer as infer_mod
-        infer_mod.FLAGS = mock_flags
-        
-        # SYSTEM FIX: Monkeypatch create_predictor to disable IR Optimization
-        # This prevents CUDNN_STATUS_NOT_SUPPORTED errors in fused convolutions on some GPUs
         if hasattr(infer_mod, 'create_predictor'):
             _orig_create_predictor = infer_mod.create_predictor
             def _patched_create_predictor(opt_config):
@@ -60,17 +49,13 @@ try:
                 return _orig_create_predictor(opt_config)
             infer_mod.create_predictor = _patched_create_predictor
             print("DEBUG: Successfully patched infer_mod.create_predictor", flush=True)
-
-    except ImportError:
-        pass
-        print("DEBUG: Force Injecting Mock FLAGS into imported deploy.python.infer", flush=True)
-    except ImportError:
-        pass
+    except Exception as e:
+        print(f"DEBUG: Failed to patch create_predictor: {e}", flush=True)
     
     PP_HUMAN_AVAILABLE = True
 
-except ImportError:
-    print("Warning: PaddleDetection 'deploy.pipeline' not found. Running in STUB mode.")
+except ImportError as e:
+    print(f"Warning: PaddleDetection 'deploy.pipeline' not found. Running in STUB mode. Error: {e}")
     PP_HUMAN_AVAILABLE = False
 
 class PPHumanModel:
@@ -80,10 +65,10 @@ class PPHumanModel:
 
     def load(self):
         if not PP_HUMAN_AVAILABLE:
-            print("PPHumanModel: Stub loaded (Real PaddleDetection not found).")
+            print("⚠️ PPHumanModel: STUB Mode Active. PaddleDetection not found. Real model will NOT run.", flush=True)
             return
 
-        print(f"Loading PP-Human Pipeline from {self.cfg_path}...")
+        print(f"Loading PP-Human Pipeline from {self.cfg_path}...", flush=True)
         
         # Check if config exists
         if not os.path.exists(self.cfg_path):
@@ -191,11 +176,10 @@ class PPHumanModel:
                     self.do_break_in_counting = False
                     self.do_break_in_counting = False
                     self.region_type = "horizontal" # or vertical
-                    self.region_polygon = []
                     self.illegal_parking_time = -1
                     
                     # Inference options
-                    self.device = 'CPU' # FORCE CPU to bypass CUDNN crash
+                    self.device = 'gpu' if paddle.is_compiled_with_cuda() else 'cpu'
                     self.run_mode = 'paddle'
                     self.trt_min_shape = 1
                     self.trt_max_shape = 1280
@@ -209,6 +193,7 @@ class PPHumanModel:
                     return None
             
             args = Args()
+            print(f"ℹ️ PPHuman Configured Device: {args.device.upper()}", flush=True)
 
             # Optimization: TensorRT
             if config.USE_TENSORRT and args.device.upper() == 'GPU':
@@ -216,6 +201,9 @@ class PPHumanModel:
                  # Modes: paddle, trt_fp32, trt_fp16, trt_int8
                  # OPTIMIZATION: Force FP16
                  args.run_mode = 'trt_fp16'
+                 
+                 # Set TRT precision/shape info explicitly if needed
+                 # For now, default pipeline logic handles it via run_mode
 
             print("DEBUG: Pipeline init started", flush=True)
             try:
@@ -231,18 +219,18 @@ class PPHumanModel:
                      self.pipeline.cfg = self.cfg
                 else:
                      raise e
-            print("DEBUG: Pipeline init done.", flush=True)
+            print("✅ PP-Human: Pipeline initialized successfully.", flush=True)
             
-            print("PP-Human: Pipeline initialized successfully.", flush=True)
         except Exception as e:
             import traceback
             traceback.print_exc()
-            print(f"Error initializing PP-Human Pipeline: {e}", flush=True)
+            print(f"❌ Error initializing PP-Human Pipeline: {e}", flush=True)
             self.pipeline = None
 
     def predict(self, frame_or_batch, conf=0.5):
         # Handle Stub Mode
         if not self.pipeline:
+             print("⚠️ PPHuman predict called but model is STUB.", flush=True)
              # Stub result
              results = []
              frames = frame_or_batch if isinstance(frame_or_batch, list) else [frame_or_batch]
@@ -253,6 +241,8 @@ class PPHumanModel:
         # Manual Pipeline Orchestration
         results = []
         frames = frame_or_batch if isinstance(frame_or_batch, list) else [frame_or_batch]
+        
+        # print(f"ℹ️ PP-Human Predict Batch Size: {len(frames)}", flush=True)
         
         if not hasattr(self, 'frame_id'):
             self.frame_id = 0
@@ -287,143 +277,243 @@ class PPHumanModel:
                 # OPTIMIZATION: DALI Tensor Support (DLPack / Paddle Tensor)
                 # If frame is already a Paddle Tensor (on GPU), bypass preprocessing
                 
-                # Check if input is a Tensor
-                if isinstance(frame, paddle.Tensor):
-                     print(f"DEBUG: DALI Tensor Input Shape: {frame.shape}", flush=True)
-                     
+                # Unified Logic: Handle both Tensor (GPU/DALI) and Numpy (CPU) via direct predictor
+                # This bypasses the buggy 'preprocess' in PaddleDetection which fails on cv2.resize for dummy frames.
+                
+                # Check if input is a Tensor or Numpy (valid frame batch)
+                is_tensor = isinstance(frame, paddle.Tensor)
+                is_numpy = isinstance(frame, np.ndarray)
+
+                if is_tensor or is_numpy:
                      # 1. Get Predictor
                      mot_predictor_obj = predictor.mot_predictor 
-                     real_predictor = mot_predictor_obj.detector.predictor
+                     
+                     # DEBUG: Inspect mot_predictor object structure
+                     # print(f"DEBUG: mot_predictor type: {type(mot_predictor_obj)} dir: {dir(mot_predictor_obj)}", flush=True)
+                     
+                     try:
+                         real_predictor = mot_predictor_obj.detector.predictor
+                     except AttributeError:
+                         # Fallback
+                         # print(f"DEBUG: SDE_Detector has no .detector! dir: {dir(mot_predictor_obj)}", flush=True) 
+                         if hasattr(mot_predictor_obj, 'det_predictor') and hasattr(mot_predictor_obj.det_predictor, 'predictor'):
+                              real_predictor = mot_predictor_obj.det_predictor.predictor
+                         elif hasattr(mot_predictor_obj, 'predictor'):
+                              real_predictor = mot_predictor_obj.predictor
+                         else:
+                              raise AttributeError("Cannot find 'predictor' in mot_predictor object")
+
                      input_names = real_predictor.get_input_names()
 
-                     # Prepare Meta Info
-                     # Since we iterate, bs=1
+                     # Normalize input to a list of frames for iteration
+                     if is_tensor:
+                         batch_size = frame.shape[0]
+                         # Keep as tensor for zero-copy if possible, but for iteration we might need slices
+                         # If it's a batch tensor, we iterate by index?
+                         # Actually, to support tracking per-frame accurately, we should loop.
+                         # But splitting a Tensor is cheap?
+                         pass
+                     else:
+                         # Numpy
+                         batch_size = frame.shape[0]
+
+                     # Iterate batch to ensure correct tracking per frame
+                     for i in range(batch_size):
+                         # Extract single frame
+                         if is_tensor:
+                             sub_frame = frame[i] # Tensor slice
+                             # Ensure dims [1, C, H, W] or [C, H, W]?
+                             # DALI Tensor is usually NCHW or NHWC? DALI layout="HWC", so Tensor is NHWC?
+                             # PP-YOLOE expects NCHW?
+                             # Let's inspect shape if needed. Assuming DALI gave us what works?
+                             pass
+                         else:
+                             sub_frame = frame[i] # Numpy slice (H, W, C)
+
+                         # Prepare Input Handles
+                     # Prepare Metadata (Batch Size 1 per frame in this loop)
                      bs = 1
                      im_shape = paddle.full([bs, 2], 640.0, dtype='float32') # Placeholder 640x640
                      scale_factor = paddle.full([bs, 2], 1.0, dtype='float32') 
                      
-                     # 2. Map inputs (Zero-Copy)
+                     # Map Inputs
                      for name in input_names:
                          handle = real_predictor.get_input_handle(name)
                          if name == 'image':
-                             # Ensure correct rank if needed. [C, H, W] -> [1, C, H, W] ??
-                             # If frame is 3D, we might need unsqueeze. 
-                             # However, let's assume DALI gave us what matches the model batch?
-                             # Typically PP-YOLOE expects [B, 3, H, W].
-                             if len(frame.shape) == 3:
-                                  frame_input = frame.unsqueeze(0)
-                                  handle.share_external_data(frame_input)
-                             else:
-                                  handle.share_external_data(frame) 
+                              if is_tensor:
+                                  try:
+                                      # Tensor Input (from DALI): uint8, HWC, RGB
+                                      # Model expects: float32, NCHW, Normalized
+                                      
+                                      # DEBUG: Check Place
+                                      # print(f"DEBUG: Frame Place: {frame.place}", flush=True)
+
+                                      # 1. Cast to Float32 & Scale
+                                      input_tensor = paddle.cast(frame, 'float32') / 255.0
+                                      
+                                      # 2. Normalize (Mean/Std)
+                                      # BUGFIX: frame.place can return gpu:-1. Use explicit CUDAPlace(0)
+                                      gpu_place = paddle.CUDAPlace(0)
+                                      mean = paddle.to_tensor([0.485, 0.456, 0.406], place=gpu_place).reshape([1, 1, 3])
+                                      std = paddle.to_tensor([0.229, 0.224, 0.225], place=gpu_place).reshape([1, 1, 3])
+                                      input_tensor = (input_tensor - mean) / std
+                                      
+                                      # 3. Permute HWC -> CHW (2, 0, 1)
+                                      input_tensor = paddle.transpose(input_tensor, perm=[2, 0, 1])
+                                      
+                                      # 4. Add Batch Dim -> NCHW (1, 3, 640, 640)
+                                      input_tensor = input_tensor.unsqueeze(0)
+                                      
+                                      # Pass to handle
+                                      handle.share_external_data(input_tensor)
+                                  except Exception as e:
+                                      print(f"⚠️ GPU Preprocess Failed: {e}. Fallback to CPU.", flush=True)
+                                      # Fallback: Convert to Numpy (Copy to CPU) and use CPU logic
+                                      
+                                      # 1. BGR -> RGB for Inference (Wait, frame is RGB from DALI if tensor)
+                                      # If it was tensor, it came from main.py as RGB.
+                                      # If main.py gpu_batch is RGB.
+                                      
+                                      img_cpu = frame.numpy() # RGB
+                                      
+                                      # 2. Resize to 640x640 (Model Input Size)
+                                      img = cv2.resize(img_cpu, (640, 640))
+                                      
+                                      # 3. Normalize and Transpose
+                                      img = img.astype('float32') / 255.0
+                                      mean = np.array([0.485, 0.456, 0.406], dtype='float32').reshape(1, 1, 3)
+                                      std = np.array([0.229, 0.224, 0.225], dtype='float32').reshape(1, 1, 3)
+                                      img = (img - mean) / std
+                                      img = img.transpose((2, 0, 1)) # HWC -> CHW
+                                      img = img[np.newaxis, :] # Add batch dim
+                                      img = np.ascontiguousarray(img)
+                                      
+                                      handle.copy_from_cpu(img)
+                              else:
+                                  # Numpy Input (Passed from Main as BGR)
+                                  # Model expects: float32, NCHW, RGB Normalized
+                                  
+                                  # 1. BGR -> RGB for Inference
+                                  img = frame[:, :, ::-1] # BGR -> RGB
+                                  
+                                  # DEBUG: Check Input
+                                  print(f"🖼️ PRE-PROCESS: Input Shape {img.shape}, Mean {img.mean():.2f}, Dtype={img.dtype}, Min={img.min()}, Max={img.max()}", flush=True)
+                                  
+                                  # 2. Resize to 640x640 (Model Input Size)
+                                  # DALI gives 640x360. Model needs 640x640.
+                                  img = cv2.resize(img, (640, 640))
+                                  
+                                  # 3. Normalize and Transpose
+                                  img = img.astype('float32') / 255.0
+                                  mean = np.array([0.485, 0.456, 0.406], dtype='float32').reshape(1, 1, 3)
+                                  std = np.array([0.229, 0.224, 0.225], dtype='float32').reshape(1, 1, 3)
+                                  img = (img - mean) / std
+                                  img = img.transpose((2, 0, 1)) # HWC -> CHW
+                                  img = img[np.newaxis, :] # Add batch dim -> (1, 3, 640, 640)
+                                  
+                                  # Ensure contiguous memory
+                                  img = np.ascontiguousarray(img)
+                                  
+                                  handle.copy_from_cpu(img)
+
                          elif name == 'im_shape':
-                             handle.share_external_data(im_shape)
+                             if is_tensor: handle.share_external_data(im_shape)
+                             else: handle.copy_from_cpu(im_shape.numpy())
                          elif name == 'scale_factor':
-                             handle.share_external_data(scale_factor)
+                             if is_tensor: handle.share_external_data(scale_factor)
+                             else: handle.copy_from_cpu(scale_factor.numpy())
                              
-                     # 3. Run Inference (Detection)
+                     # Run Inference
                      real_predictor.run()
                      
-                     # 4. Get Outputs
+                     # Get Outputs
                      output_names = real_predictor.get_output_names()
                      mot_res_raw = {}
                      for name in output_names:
                          out_tensor = real_predictor.get_output_handle(name)
                          mot_res_raw[name] = out_tensor.copy_to_cpu()
                          
-                     # 5. Run Tracker (CPU)
-                     # We need to parse detection results and feed to tracker.
-                     # Detection output is usually [N, 6] (cls, score, x, y, x, y)
-                     # Find the boxes tensor
+                     # Run Tracker
                      dets = np.zeros((0, 6))
                      for k, v in mot_res_raw.items():
                          if v.ndim == 2 and v.shape[1] == 6:
                              dets = v
                              break
-                             
-                     tracker = mot_predictor_obj.tracker
-                     # Tracker expects [cls, score, x, y, x, y]
-                     track_res = tracker.update(dets, None) # [x1, y1, x2, y2, id, score, cls, ...]
                      
-                     # 6. Populate 'res'
+                     # Force Filter Low Confidence (Fix for "100 boxes" noise)
+                     # User complained about no identification, but logs show 0.4-0.5. 
+                     # We set threshold to 0.05 to catch real detections while filtering garbage
+                     DET_THRESHOLD = 0.05
+                     if len(dets) > 0:
+                         # DEBUG: Print Raw Scores before filter
+                         print(f"🔎 DEBUG: Raw Scores (top 5): {dets[:5, 1]}", flush=True)
+                         keep_mask = dets[:, 1] > DET_THRESHOLD
+                         dets = dets[keep_mask]
+
+                     # Minimal Debug
+                     if len(dets) > 0:
+                         max_score = np.max(dets[:, 1])
+                         curr_count = len(dets)
+                         if max_score > DET_THRESHOLD:
+                            print(f"🕵️ DETECTED: {curr_count} boxes (Filtered > {DET_THRESHOLD}). Max: {max_score:.2f}", flush=True)
+                            # Print first 3 boxes to check for garbage coordinates
+                            for i in range(min(3, len(dets))):
+                                box = dets[i]
+                                print(f"   Box[{i}]: Score={box[1]:.4f} Class={box[0]} Coords={box[2:]}", flush=True)
+                     else:
+                         # Print if we filtered everything
+                         pass
+                         # print("DEBUG: No boxes passed threshold filter", flush=True)
+                     
+                     tracker = mot_predictor_obj.tracker
+                     # Handle tracker update
+                     track_res = tracker.update(dets, None) 
+                     
+                     # Populate 'res'
                      for trk in track_res:
                          tid = int(trk[4])
                          score = float(trk[5])
                          cls_id = int(trk[6])
                          bbox = trk[0:4].tolist()
+                         # FILTER: Threshold check
+                         # We lower this to match the input filter (0.1)
+                         if score >= 0.1: 
+                             res.id.append(tid)
+                             res.cls.append(cls_id)
+                             res.conf.append(score)
+                             res.boxes.append(bbox)
+                             # DEBUG: Print Track Accept
+                             # print(f"✅ Track Accepted: ID={tid} Score={score:.2f}", flush=True)
                          
-                         res.id.append(tid)
-                         res.cls.append(cls_id)
-                         res.conf.append(score)
-                         res.boxes.append(bbox)
-                     
-                     # 7. Prepare for Attributes/Actions (CPU)
-                     # Subsequent blocks use 'frame' (numpy) and 'mot_res' (dict)
-                     # We need to construct 'mot_res' dict manually from our tracker results
-                     # because 'crop_image_with_mot' uses it.
-                     # Format: {'boxes': [[id, cls, score, x1, y1, x2, y2], ...]}
-                     
+                     # Construct 'mot_res' for downstream
                      mot_res = {'boxes': []}
                      for i in range(len(res.id)):
                          row = [res.id[i], res.cls[i], res.conf[i]] + res.boxes[i]
                          mot_res['boxes'].append(row)
                          
-                     # Convert GPU Tensor frame to CPU Numpy for 'crop_image' and subsequent predictors
-                     # Transpose if needed? DALI is CHW mostly. OpenCv is HWC BGR.
-                     # DALI Pipeline output_type=types.RGB.
-                     # So frame is [C, H, W] RGB.
-                     # We need [H, W, C] BGR for OpenCV functions downstream.
-                     
-                     frame_cpu = frame.numpy() # [C, H, W]
-                     if frame_cpu.shape[0] == 3: # CHW
-                         frame_cpu = np.transpose(frame_cpu, (1, 2, 0)) # [H, W, C]
-                         
-                     # RGB to BGR?
-                     # DALI gave RGB. PP-Human predictors usually expect BGR/RGB? 
-                     # `predict_image` usually loads via cv2.imread (BGR).
-                     # So expected input is BGR.
-                     frame_cpu = frame_cpu[:, :, ::-1] # RGB to BGR
-                     
-                     # Overwrite local frame variable
-                     frame = frame_cpu
-                     
-                     # Fall through to Attribute/Action blocks...
-                     
+                     # Prepare 'frame' for downstream (Numpy)
+                     if is_tensor:
+                         frame_cpu = frame.numpy()
+                         if frame_cpu.shape[0] == 3: # CHW
+                             frame_cpu = np.transpose(frame_cpu, (1, 2, 0))
+                         # RGB to BGR for OpenCV (Visualization)
+                         frame = frame_cpu[:, :, ::-1]
+                     else:
+                         # Numpy input is BGR (from Main)
+                         # Visualization expects BGR. 
+                         # No conversion needed.
+                         pass
+
                 else:
-                    # Standard CPU path (OpenCV/Numpy)
-                    # ... [Original Logic]
-                    print(f"DEBUG: Frame shape: {frame.shape}", flush=True)
-                    
-                    # Handle Batch (4D) Input
-                    if frame.ndim == 4:
-                        mot_input = [frame[i] for i in range(frame.shape[0])]
-                    else:
-                        mot_input = [frame]
+                    # Fallback (Should be unreachable if input is Tensor or Numpy)
+                    pass
 
-                    mot_res_raw = predictor.mot_predictor.predict_image(
-                        mot_input, visual=False, reuse_det_result=False, frame_count=self.frame_id
-                    )
-                    mot_res = parse_mot_res(mot_res_raw)
-                    if 'boxes' in mot_res:
-                         for row in mot_res['boxes']:
-                             if len(row) >= 7:
-                                 tid = int(row[0])
-                                 cls_id = int(row[1])
-                                 score = float(row[2])
-                                 bbox = row[3:7].tolist()
-                                 res.id.append(tid)
-                                 res.cls.append(cls_id)
-                                 res.conf.append(score)
-                                 res.boxes.append(bbox)
-                    
-                    has_detections = len(res.boxes) > 0
-        
-
+                has_detections = len(res.id) > 0
                 
                 # 2. Attributes (Optional)
                 if predictor.with_human_attr and has_detections:
                     crop_input, new_bboxes, ori_bboxes = crop_image_with_mot(frame, mot_res)
                     attr_res = predictor.attr_predictor.predict_image(crop_input, visual=False)
-                    # output is dict {'output': [{'gender':..., 'age':...}, ...]}
                     if 'output' in attr_res:
                         attrs_list = attr_res['output']
                         for i, attr in enumerate(attrs_list):
@@ -433,32 +523,18 @@ class PPHumanModel:
 
                 # 3. Action (Skeleton)
                 if predictor.with_skeleton_action and has_detections:
-                    # Keypoint Detection first
-                    # Need crop_input from MOT
                     if not 'crop_input' in locals():
                         crop_input, new_bboxes, ori_bboxes = crop_image_with_mot(frame, mot_res)
-                        
                     kpt_pred = predictor.kpt_predictor.predict_image(crop_input, visual=False)
-                    
-                    # Skeleton Action
-                    # predict_skeleton_with_mot(mot_res, kpt_pred)
                     skeleton_res = predictor.skeleton_action_predictor.predict_skeleton_with_mot(mot_res, kpt_pred)
                     
-                    # Parse Action Result
-                    # skeleton_res is usually list of dicts or similar. 
-                    # Need to verify format. Assuming standard list of {track_id, class, ...}
-                    # Actually pipeline updates 'action' in result.
-                    # Let's inspect 'skeleton_res'.
-                    # It usually returns a list of actions associated with tracks.
                     if isinstance(skeleton_res, list):
                         for act in skeleton_res:
                             tid = act.get('track_id')
                             cls = act.get('class', -1)
-                            # 0: Falling, 1: Fighting (Default)
                             action_name = "unknown"
                             if cls == 0: action_name = "falling"
                             elif cls == 1: action_name = "fighting"
-                            
                             if tid is not None:
                                 res.actions[tid] = action_name
 
@@ -466,50 +542,36 @@ class PPHumanModel:
                 if getattr(predictor, 'with_idbased_detaction', False) and has_detections:
                      if not 'crop_input' in locals():
                         crop_input, new_bboxes, ori_bboxes = crop_image_with_mot(frame, mot_res)
-                     
                      det_action_res = predictor.det_action_predictor.predict(crop_input, mot_res)
                      if isinstance(det_action_res, list):
                          for act in det_action_res:
                              tid = act.get('track_id')
-                             label = act.get('label') # e.g. "smoking"
+                             label = act.get('label')
                              if tid is not None and label:
                                  res.actions[tid] = label
 
                 # 5. Action (Classification based - Calling)
-                # Time-based threshold logic (10 PM - 5 AM)
                 from datetime import datetime
                 now = datetime.now()
                 night_mode = (now.hour >= 22 or now.hour < 5)
                 call_threshold = 0.4 if night_mode else 0.8
                 
                 if getattr(predictor, 'with_idbased_clsaction', False) and has_detections:
-                     # Dynamically update threshold if supported
-                     if hasattr(predictor, 'cls_action_predictor'):
-                         if hasattr(predictor.cls_action_predictor, 'threshold'):
+                     if hasattr(predictor, 'cls_action_predictor') and hasattr(predictor.cls_action_predictor, 'threshold'):
                              predictor.cls_action_predictor.threshold = call_threshold
-                             
                      if not 'crop_input' in locals():
                         crop_input, new_bboxes, ori_bboxes = crop_image_with_mot(frame, mot_res)
-                     
-                     # Predict
                      cls_action_res = predictor.cls_action_predictor.predict(crop_input, mot_res)
-                     
                      if isinstance(cls_action_res, list):
                          for act in cls_action_res:
                              tid = act.get('track_id')
-                             label = act.get('label') # e.g. "calling"
-                             score = act.get('score', 0.0) # Check score against our manual threshold if needed? 
-                             # Predictor usually filters by its internal threshold.
-                             
+                             label = act.get('label')
                              if tid is not None and label:
-                                 # Optional: Manual double check if internal threshold update failed
-                                 # if score >= call_threshold:
                                  res.actions[tid] = label
 
             except Exception as e:
                 print(f"PP-Human Prediction Error: {e}")
                 import traceback
-                traceback.print_exc()
             
             results.append(res)
             

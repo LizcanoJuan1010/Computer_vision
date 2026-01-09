@@ -223,9 +223,22 @@ class SpatialAnalytics:
         else:
             detections = sv.Detections.empty()
 
+        if len(detections) > 0:
+             # DEBUG: Print incoming classes
+             # unique_classes = np.unique(detections.class_id)
+             # print(f"DEBUG: Spatial Input Classes: {unique_classes} | Expecting: {self.intrusion_classes}", flush=True)
+             pass
+
         # Filter detections for relevant classes (Union)
         relevant_classes = list(set(self.intrusion_classes + self.line_crossing_classes))
-        detections = detections[np.isin(detections.class_id, relevant_classes)]
+        
+        # DEBUG: Check if we are filtering everything
+        mask = np.isin(detections.class_id, relevant_classes)
+        if len(detections) > 0 and np.sum(mask) == 0:
+             unique_classes = np.unique(detections.class_id)
+             print(f"⚠️ Spatial Filter Warning: Dropping ALL detections. Incoming Classes: {unique_classes} vs Allowed: {relevant_classes}", flush=True)
+
+        detections = detections[mask]
 
         # --- Line Crossing Logic ---
         mask_line = np.isin(detections.class_id, self.line_crossing_classes)

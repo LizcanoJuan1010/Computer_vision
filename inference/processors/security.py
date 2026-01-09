@@ -76,14 +76,19 @@ class SecurityProcessor(BaseProcessor):
                       print(f"Error auto-saving unknown face: {e}")
                       self.db.conn.rollback()
 
-    def process_batch(self, frames, camera_ids, configs):
+    def process_batch(self, frames, camera_ids, configs, gpu_frames=None):
         start_time = time.time()
         
         # --- 1. PP-Human Inference (Batch) ---
         # --- 1. PP-Human Inference (Sequential to avoid MOT batch crash) ---
         # Run Detection/Tracking/Action on every frame individually
         # predict() returns a list [PPHumanResult], so we take [0]
-        pp_results_batch = [self.yolo_model.predict(f)[0] for f in frames]
+        
+        # GPU Optimization: Use GPU frames if available
+        if gpu_frames is not None:
+            pp_results_batch = [self.yolo_model.predict(f)[0] for f in gpu_frames]
+        else:
+            pp_results_batch = [self.yolo_model.predict(f)[0] for f in frames]
         
         # DEBUG: Print detection stats
         for i, res in enumerate(pp_results_batch):

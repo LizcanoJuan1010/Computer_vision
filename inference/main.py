@@ -3,13 +3,19 @@ import os
 import json
 import time
 import numpy as np
-import cv2  # Utility only
+import cv2
 import paddle
 import nats
 import signal
+import threading
+import av
 from collections import defaultdict
 from prometheus_client import start_http_server, Counter, Histogram, Gauge
 from aiohttp import web
+
+# CRITICAL: Set Paddle device BEFORE any model loading
+paddle.set_device('gpu:0')
+print(f"✅ Paddle Device set to: {paddle.get_device()}")
 
 # --- Prometheus Metrics ---
 PROCESSING_LATENCY = Histogram('processing_latency_seconds', 'Time spent processing a batch of frames')
@@ -32,16 +38,116 @@ from .processors.security import SecurityProcessor
 from .loader import load_blacklist
 from .cache.face_cache_lfu import FaceCacheLFU
 
-# DALI Pipeline Imports
-try:
-    from .pipeline.dali import RTSPSource, rtsp_pipeline, HAS_DALI
-    from nvidia.dali.plugin.paddle import DALIGenericIterator
-    from nvidia.dali.plugin.base_iterator import LastBatchPolicy
-except ImportError:
-    print("⚠️ DALI Import Error. DALI will be disabled.")
-    HAS_DALI = False
-    RTSPSource = None
-    rtsp_pipeline = None
+
+class ThreadedRTSPReader:
+    """
+    Threaded RTSP reader that continuously decodes frames in background threads.
+    Each camera gets its own decoder thread. Frames are stored in a shared buffer.
+    """
+    
+    def __init__(self, camera_urls: dict, target_size=(640, 640)):
+        self.camera_urls = camera_urls
+        self.target_size = target_size
+        self.frames = {}  # cid -> latest frame (resized, RGB)
+        self.locks = {}   # cid -> threading.Lock
+        self.running = True
+        self.threads = []
+        
+        for cid in camera_urls.keys():
+            self.frames[cid] = None
+            self.locks[cid] = threading.Lock()
+        
+        # Start reader threads
+        for cid, url in camera_urls.items():
+            t = threading.Thread(target=self._reader_loop, args=(cid, url), daemon=True)
+            t.start()
+            self.threads.append(t)
+            print(f"🧵 Started reader thread for camera {cid[:8]}...")
+    
+    def _letterbox_resize(self, img, target_size):
+        """Resize image by stretching to target size (fixes coordinate alignment)."""
+        # We use simple resize (stretch) instead of letterbox because
+        # SpatialAnalytics polygons are defined relative (0-1) to the FULL frame.
+        # If we add black bars (letterbox), the polygons (mapped to full 640x640)
+        # will not align with the video content (which is smaller/centered).
+        return cv2.resize(img, target_size, interpolation=cv2.INTER_LINEAR)
+    
+    def _reader_loop(self, cid: str, url: str):
+        """Background thread that continuously reads and decodes RTSP frames."""
+        while self.running:
+            container = None
+            try:
+                options = {
+                    'rtsp_transport': 'tcp',
+                    'fflags': 'nobuffer',
+                    'flags': 'low_delay',
+                    'stimeout': '5000000',
+                    'reorder_queue_size': '0'
+                }
+                container = av.open(url, options=options)
+                stream = container.streams.video[0]
+                stream.thread_type = 'AUTO'
+                
+                print(f"✅ Connected: {cid[:8]}...")
+                
+                for packet in container.demux(stream):
+                    if not self.running:
+                        break
+                    
+                    try:
+                        frames = packet.decode()
+                        if frames:
+                            frame_obj = frames[-1]
+                            
+                            # Convert to RGB numpy (Model expects RGB usually)
+                            img = frame_obj.to_ndarray(format='rgb24')
+                            
+                            # Letterbox resize to target size
+                            resized = self._letterbox_resize(img, self.target_size)
+                            # Note: resized is now RGB.
+                            # cv2 functions usually expect BGR, but we want to feed Model RGB.
+                            # We will need to convert to BGR for display/saving if needed.
+                            
+                            # Update shared buffer
+                            with self.locks[cid]:
+                                self.frames[cid] = resized
+                                
+                    except Exception as decode_err:
+                        continue
+                        
+            except Exception as e:
+                print(f"❌ Connection Error {cid[:8]}: {e}. Retrying in 5s...")
+                time.sleep(5)
+            finally:
+                if container:
+                    try:
+                        container.close()
+                    except:
+                        pass
+                
+            if self.running:
+                time.sleep(1)
+    
+    def get_frames(self):
+        """Get all available frames as a batch."""
+        batch_frames = []
+        batch_ids = []
+        
+        for cid in self.camera_urls.keys():
+            frame = None
+            if self.frames[cid] is not None:
+                with self.locks[cid]:
+                    frame = self.frames[cid].copy()
+            
+            if frame is not None:
+                batch_frames.append(frame)
+                batch_ids.append(cid)
+        
+        return batch_frames, batch_ids
+    
+    def stop(self):
+        self.running = False
+
 
 async def run():
     # 1. Initialize Database
@@ -59,46 +165,25 @@ async def run():
         face_model = FaceModel()
         face_model.load()
         lpr_model = LPRModel()
-        lpr_model.load()
-        load_blacklist(face_model) # Legacy
     except Exception as e:
-        print(f"❌ Error loading models: {e}")
+        print(f"❌ Model Load Failed: {e}")
         return
 
-    # 2.5 Initialize Face Cache
-    face_cache = None
-    if config.FACE_CACHE_ENABLED:
-        try:
-            print("🔄 Initializing FaceCacheLFU...")
-            face_cache = FaceCacheLFU(
-                l1_capacity=config.FACE_CACHE_L1_CAPACITY,
-                redis_url=config.FACE_CACHE_REDIS_URL,
-                default_threshold=config.SIMILARITY_THRESHOLD
-            )
-            await face_cache.initialize()
-            await face_cache.load_global_blacklist(db)
-            print(f"✅ FaceCacheLFU initialized.")
-        except Exception as e:
-            print(f"⚠️ Face cache init failed: {e}")
-            face_cache = None
-
-    # 3. Initialize Processor
-    loop = asyncio.get_running_loop()
-
-    def publish_alarm(subject, data):
-        if 'nc' in locals() and nc and nc.is_connected:
-            payload = json.dumps(data).encode()
-            loop.call_soon_threadsafe(lambda: asyncio.create_task(nc.publish(subject, payload)))
-
-    processor = SecurityProcessor(db, pp_human_model, face_model, lpr_model, face_cache=face_cache, publish_callback=publish_alarm, loop=loop)
-
+    # 3. Initialize Security Processor
+    face_cache = FaceCacheLFU(l1_capacity=config.FACE_CACHE_L1_CAPACITY)
+    processor = SecurityProcessor(
+        db=db,
+        yolo_model=pp_human_model,
+        face_model=face_model,
+        lpr_model=lpr_model,
+        face_cache=face_cache
+    )
+    
     # 4. Connect to NATS
     print(f"Connecting to NATS at {config.NATS_URL}...")
     nc = await nats.connect(config.NATS_URL)
     
-    
-    # --- Web Server (Debug) ---
-    # Start BEFORE DALI init to ensure port is open even if RTSP connects slowly
+    # 5. Web Server for Debug Streams
     latest_annotated_frames = {}
     
     async def mjpeg_handler(request):
@@ -112,11 +197,13 @@ async def run():
             while True:
                 if camera_id in latest_annotated_frames:
                     frame = latest_annotated_frames[camera_id]
-                    ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
-                    if ret:
-                        await response.write(b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-                await asyncio.sleep(0.04) # ~250 FPS cap check
-        except: pass
+                    if frame is not None:
+                        ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                        if ret:
+                            await response.write(b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                await asyncio.sleep(0.033)  # ~30 FPS
+        except:
+            pass
         return response
 
     app = web.Application()
@@ -128,141 +215,115 @@ async def run():
     await site.start()
     print("✅ Debug Stream Server running on port 5000")
 
-    # 5. DALI / RTSP Setup
-    rtsp_source = None
-    dali_iter = None
-    
-    if HAS_DALI:
-         BATCH_SIZE = int(os.getenv("BATCH_SIZE", "1"))
-         
-         # Fetch Active RTSP Cameras
-         active_cameras = {} 
-         cursor = db.conn.cursor()
-         cursor.execute("SELECT id, rtsp_url, meta_info FROM cameras WHERE is_active = true AND rtsp_url IS NOT NULL")
-         rows = cursor.fetchall()
-         
-         for row in rows:
-             if row[1] and row[1].startswith('rtsp'):
-                raw_url = row[1]
-                # Replace placeholders with env vars
-                replacements = {
-                    "{USER}": os.getenv("HIK_USER", "admin"),
-                    "{PASS}": os.getenv("HIK_PASS", "password"),
-                    "{IP}": os.getenv("HIK_IP", "127.0.0.1"),
-                    "{PORT_RTSP}": os.getenv("PORT_RTSP", "554")
-                }
-                for placeholder, val in replacements.items():
-                    if val and placeholder in raw_url:
-                        raw_url = raw_url.replace(placeholder, val)
-                        
-                active_cameras[row[0]] = raw_url
-                
-         if active_cameras:
-             print(f"🚀 Initializing DALI Pipeline for {len(active_cameras)} cameras...")
-             rtsp_source = RTSPSource(active_cameras, BATCH_SIZE)
-             pipe = rtsp_pipeline(source_callback=rtsp_source, batch_size=BATCH_SIZE, num_threads=2, device_id=0)
-             pipe.build()
-             dali_iter = DALIGenericIterator(pipelines=[pipe], output_map=['frames'], size=-1, auto_reset=True, last_batch_policy=LastBatchPolicy.PARTIAL)
-         else:
-             print("⚠️ No active RTSP cameras found for DALI.")
-    
-    # --- Web Server (Debug) ---
-
-
-    # Load Camera Configurations (Sync at startup)
+    # 6. Setup RTSP Readers
+    rtsp_reader = None
     camera_configs = {}
-    if HAS_DALI and active_cameras:
+    
+    # Fetch active cameras from DB
+    active_cameras = {}
+    try:
+        with db.conn.cursor() as cur:
+            cur.execute("SELECT id, rtsp_url FROM cameras WHERE is_active = true")
+            cameras_query = cur.fetchall()
+    except Exception as e:
+        print(f"❌ Failed to fetch cameras: {e}")
+        cameras_query = []
+    
+    if cameras_query:
+        replacements = {
+            '{USER}': os.getenv('HIK_USER', ''),
+            '{PASS}': os.getenv('HIK_PASS', ''),
+            '{IP}': os.getenv('HIK_IP', ''),
+            '{PORT_RTSP}': os.getenv('PORT_RTSP', '554')
+        }
+        
+        for row in cameras_query:
+            raw_url = row[1]
+            # Replace placeholders
+            for placeholder, val in replacements.items():
+                if val and placeholder in raw_url:
+                    raw_url = raw_url.replace(placeholder, val)
+            
+            # Skip placeholder URLs
+            if 'placeholder' in raw_url.lower():
+                print(f"⚠️ Skipping placeholder camera: {row[0][:8]}")
+                continue
+                
+            active_cameras[row[0]] = raw_url
+    
+    if active_cameras:
+        print(f"🚀 Starting RTSP readers for {len(active_cameras)} cameras...")
+        rtsp_reader = ThreadedRTSPReader(active_cameras, target_size=(640, 640))
+        
+        # Pre-load camera configurations
         print("🔄 Pre-loading camera configurations...")
         for cam_id in active_cameras.keys():
             try:
                 cfg = db.get_camera_config_from_db(cam_id)
                 if cfg:
                     camera_configs[cam_id] = cfg
-                    print(f"✅ Loaded config for {cam_id} (Features: {cfg.get('features')})")
-                else:
-                    print(f"⚠️ No config found for {cam_id}, using defaults.")
+                    print(f"✅ Loaded config for {cam_id[:8]}... (Features: {cfg.get('features')})")
             except Exception as e:
-                print(f"❌ Error loading config for {cam_id}: {e}")
+                print(f"❌ Error loading config for {cam_id[:8]}: {e}")
+    else:
+        print("⚠️ No active cameras found!")
 
     print("✅ System Started. Entering Main Loop.")
     
+    loop = asyncio.get_event_loop()
+    
     # --- MAIN LOOP ---
     try:
+        frame_cnt = 0
         while True:
-            # 1. DALI Inference Branch
-            print(f"🔄 Loop Tick. DALI? {dali_iter is not None}", flush=True)
-            if dali_iter is not None:
+            if rtsp_reader is not None:
                 try:
-                    # Non-blocking check? DALIGenericIterator is blocking generally but fast on GPU.
-                    # We run it in executor if needed, but let's try direct call for raw speed.
-                    # Warning: This blocks the asyncio loop!
-                    # Ideally: await loop.run_in_executor(None, next, dali_iter)
+                    # Get frames from threaded readers
+                    batch_frames, batch_ids = rtsp_reader.get_frames()
                     
-                    try:
-                        def fetch_next():
-                            try:
-                                return next(dali_iter)
-                            except StopIteration:
-                                return None
-                        data = await loop.run_in_executor(None, fetch_next)
-                    except Exception as e:
-                        print(f"❌ DALI Fetch Error: {e}", flush=True)
-                        data = None
-
-                    if data is None:
-                        print("⚠️ End of stream/batch. Resetting.", flush=True)
-                        dali_iter.reset()
+                    if not batch_frames:
+                        await asyncio.sleep(0.05)
                         continue
                     
-                    # data is list of dicts.
-                    tensor_raw = data[0]['frames'] # Paddle Raw Tensor (GPU)
-                    # Wrap in high-level Tensor to get .numpy()
-                    tensor_batch = paddle.to_tensor(tensor_raw).numpy() # Convert to CPU Numpy
-
-                    # Update IDs
-                    batch_ids = rtsp_source.current_batch_ids
-                    # batch_configs = [{}] * len(batch_ids) # TODO: fetching config
+                    # Stack into batch array (N, H, W, C)
+                    cpu_batch = np.stack(batch_frames, axis=0)
+                    
+                    # Get configs for each camera
                     batch_configs = [camera_configs.get(cid, {}) for cid in batch_ids]
                     
+                    frame_cnt += 1
+                    if frame_cnt % 30 == 0:
+                        print(f"📦 Processing batch: {len(batch_ids)} cameras, Shape={cpu_batch.shape}, Mean={cpu_batch.mean():.1f}")
+                    
                     with PROCESSING_LATENCY.time():
-                         # Pass CPU Numpy batch to processor
-                         processed = processor.process_batch(tensor_batch, batch_ids, batch_configs)
-                         
-                         # Update Debug Streams
-                         # Processed returns list of numpy/cpu frames (annotated)
-                         # We need to map them back to IDs
-                         if len(processed) == len(batch_ids):
-                             for cid, frame in zip(batch_ids, processed):
-                                 latest_annotated_frames[cid] = frame
-                                 
+                        # Process the batch
+                        processed = processor.process_batch(cpu_batch, batch_ids, batch_configs, gpu_frames=None)
+                        
+                        # Update debug streams
+                        if len(processed) == len(batch_ids):
+                            for cid, frame in zip(batch_ids, processed):
+                                latest_annotated_frames[cid] = frame
+                    
                     FRAMES_PROCESSED.inc(len(batch_ids))
                     
-                    # Debug: Check what indices we actually have
-                    if len(latest_annotated_frames) > 0: # Print every batch for now
-                        keys = list(latest_annotated_frames.keys())
-                        print(f"🔍 DEBUG: Active Video Keys: {keys}")
-                        # Check first frame content
-                        if keys:
-                             sample_frame = latest_annotated_frames[keys[0]]
-                             if sample_frame is not None:
-                                 print(f"🔍 DEBUG: Frame Stats - Shape: {sample_frame.shape}, Mean: {sample_frame.mean()}")
-                             else:
-                                 print("🔍 DEBUG: Frame is None!")
+                    # Small sleep to control frame rate (~30 FPS)
+                    await asyncio.sleep(0.01)
                     
-                except StopIteration:
-                    print("⚠️ StopIteration caught! Resetting DALI.", flush=True)
-                    dali_iter.reset()
                 except Exception as e:
-                    print(f"❌ Error in DALI loop: {e}", flush=True)
-                    await asyncio.sleep(0.1) # Backoff
+                    print(f"❌ Error in main loop: {e}", flush=True)
+                    import traceback
+                    traceback.print_exc()
+                    await asyncio.sleep(0.1)
             else:
-                # No DALI? Sleep to prevent CPU spin
                 await asyncio.sleep(1)
 
     except asyncio.CancelledError:
         print("Stopping...")
     finally:
-        if runner: await runner.cleanup()
+        if rtsp_reader:
+            rtsp_reader.stop()
+        if runner:
+            await runner.cleanup()
         await nc.close()
         db.close()
 
@@ -270,5 +331,6 @@ if __name__ == '__main__':
     try:
         import uvloop
         uvloop.install()
-    except: pass
+    except:
+        pass
     asyncio.run(run())

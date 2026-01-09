@@ -129,7 +129,12 @@ WORKDIR /app
 ENV PYTHONPATH="${PYTHONPATH}:/app/PaddleDetection:/app/PaddleDetection/deploy/pipeline"
 
 # Copiar código de inference
-COPY . .
+# Copiar código de inference preservando estructura de paquete
+COPY . /app/inference
+
+# Copiar pesos locales (Face, Vehicles) a la carpeta central de pesos
+# Esto mezcla los descargados (PP-Human) con los locales
+COPY ./weights/ /app/weights/
 
 # Descargar modelos en build time (opcional - comentar si prefieres lazy loading)
 # Descargar modelos en build time (opcional - comentar si prefieres lazy loading)

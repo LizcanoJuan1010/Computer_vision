@@ -208,7 +208,8 @@ class SpatialAnalytics:
         detections_input: Can be PPHumanResult or generic object with boxes, conf, cls, id.
         """
         # Convert to Supervision Detections
-        if hasattr(detections_input, 'boxes') and len(detections_input.boxes) > 0:
+        # Convert to Supervision Detections
+        if hasattr(detections_input, 'boxes') and detections_input.boxes is not None and len(detections_input.boxes) > 0:
             # Check format of boxes
             xyxy = np.array(detections_input.boxes) if isinstance(detections_input.boxes, list) else detections_input.boxes
             confidence = np.array(detections_input.conf) if isinstance(detections_input.conf, list) else detections_input.conf
@@ -216,7 +217,7 @@ class SpatialAnalytics:
             tracker_id = np.array(detections_input.id).astype(int) if isinstance(detections_input.id, list) else detections_input.id
             
             # If no tracker_id provided (e.g. PP-Human didn't track yet?), provide None
-            if len(tracker_id) == 0:
+            if tracker_id is None or len(tracker_id) == 0:
                 tracker_id = None
             
             detections = sv.Detections(

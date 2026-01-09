@@ -1,6 +1,7 @@
 DET:
   model_dir: /app/weights/mot_ppyoloe_l_36e_pipeline
   batch_size: 1
+  threshold: 0.2
 
 ATTR:
   model_dir: /app/weights/PPLCNet_x1_0_person_attribute_945_infer
@@ -8,7 +9,7 @@ ATTR:
 
 SKELETON_ACTION:
   model_dir: /app/weights/STGCN
-  enable: True
+  enable: False
   max_frames: 50
   display_frames: 80
   coord_size: [384, 512]
@@ -20,7 +21,7 @@ ID_BASED_DETACTION:
   threshold: 0.3
   display_frames: 80
   skip_frame_num: 2
-  enable: True # Enabled dynamically in code
+  enable: False # Enabled dynamically in code
 
 # Calling/Phoning Detection configuration
 ID_BASED_CLSACTION:
@@ -29,13 +30,13 @@ ID_BASED_CLSACTION:
   threshold: 0.8
   display_frames: 80
   skip_frame_num: 2
-  enable: True # Enabled dynamically in code
+  enable: False # Enabled dynamically in code
 
   # FALTA ESTO PARA PELEAS
 VIDEO_ACTION:
   model_dir: /app/weights/pptsm_fight_detection  # Modelo específico de peleas
   batch_size: 1
-  enable: True
+  enable: False
   frame_len: 8   # Cuantos frames analiza para decidir si es pelea
   sample_freq: 4 # Cada cuanto toma un frame
 
@@ -43,4 +44,4 @@ VIDEO_ACTION:
 REID:
   model_dir: /app/weights/reid_model # Modelo que convierte la imagen de la persona en vectores matemáticos únicos
   batch_size: 16
-  enable: True
+  enable: False

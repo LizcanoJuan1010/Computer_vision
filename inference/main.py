@@ -32,6 +32,7 @@ except Exception as e:
 from .config import config
 from .database import Database
 from .models.pp_human import PPHumanModel
+from .models.pp_vehicle import PPVehicleModel # Added
 from .models.face import FaceModel
 from .models.lpr import LPRModel
 from .processors.security import SecurityProcessor
@@ -48,13 +49,15 @@ class ThreadedRTSPReader:
     def __init__(self, camera_urls: dict, target_size=(640, 640)):
         self.camera_urls = camera_urls
         self.target_size = target_size
-        self.frames = {}  # cid -> latest frame (resized, RGB)
-        self.locks = {}   # cid -> threading.Lock
+        self.frames = {}           # cid -> latest frame (resized, RGB)
+        self.original_frames = {}  # cid -> original frame (RGB)
+        self.locks = {}            # cid -> threading.Lock
         self.running = True
         self.threads = []
         
         for cid in camera_urls.keys():
             self.frames[cid] = None
+            self.original_frames[cid] = None
             self.locks[cid] = threading.Lock()
         
         # Start reader threads
@@ -102,15 +105,21 @@ class ThreadedRTSPReader:
                             # Convert to RGB numpy (Model expects RGB usually)
                             img = frame_obj.to_ndarray(format='rgb24')
                             
-                            # Letterbox resize to target size
-                            resized = self._letterbox_resize(img, self.target_size)
-                            # Note: resized is now RGB.
-                            # cv2 functions usually expect BGR, but we want to feed Model RGB.
-                            # We will need to convert to BGR for display/saving if needed.
+                            # Performance: Resize huge frames (e.g. 2K/4K) to 720p to speed up inference transfer
+                            h, w = img.shape[:2]
+                            if w > 1280:
+                                new_w = 1280
+                                new_h = int(h * (1280 / w))
+                                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                             
-                            # Update shared buffer
+                            # Store ORIGINAL resolution for model (now capped at 720p)
+                            # and RESIZED for visualization/spatial analytics (640x640)
+                            resized = self._letterbox_resize(img, self.target_size)
+                            
+                            # Update shared buffer (store both)
                             with self.locks[cid]:
-                                self.frames[cid] = resized
+                                self.frames[cid] = resized  # For visualization
+                                self.original_frames[cid] = img  # For model
                                 
                     except Exception as decode_err:
                         continue
@@ -129,21 +138,27 @@ class ThreadedRTSPReader:
                 time.sleep(1)
     
     def get_frames(self):
-        """Get all available frames as a batch."""
-        batch_frames = []
+        """Get all available frames as a batch.
+        Returns: (resized_frames, original_frames, camera_ids)
+        """
+        batch_frames = []      # Resized for visualization
+        batch_originals = []   # Original for model
         batch_ids = []
         
         for cid in self.camera_urls.keys():
             frame = None
+            original = None
             if self.frames[cid] is not None:
                 with self.locks[cid]:
                     frame = self.frames[cid].copy()
+                    original = self.original_frames[cid].copy() if self.original_frames[cid] is not None else None
             
-            if frame is not None:
+            if frame is not None and original is not None:
                 batch_frames.append(frame)
+                batch_originals.append(original)
                 batch_ids.append(cid)
         
-        return batch_frames, batch_ids
+        return batch_frames, batch_originals, batch_ids
     
     def stop(self):
         self.running = False
@@ -160,30 +175,48 @@ async def run():
 
     # 2. Initialize Models
     try:
+        print("Loading PP-Human Model...")
         pp_human_model = PPHumanModel()
         pp_human_model.load()
+        print("Loading Face Model...")
         face_model = FaceModel()
         face_model.load()
+        
+        # 3. LPR Model (Used by Vehicle Model)
+        print("Loading LPR Model...")
         lpr_model = LPRModel()
+        lpr_model.load()
+        
+        # 3.5 Vehicle Model (Wraps LPR)
+        print("Loading PP-Vehicle Model...")
+        # Define path to downloaded weights
+        pp_vehicle_weights = "/app/inference/weights/ppvehicle"
+        vehicle_model = PPVehicleModel(model_dir=pp_vehicle_weights, lpr_model=lpr_model)
+        vehicle_model.load()
+        # vehicle_model = None
     except Exception as e:
         print(f"❌ Model Load Failed: {e}")
         return
 
-    # 3. Initialize Security Processor
+    # 4. Security Processor (Orchestrator)
+    print("Initializing Security Processor...")
     face_cache = FaceCacheLFU(l1_capacity=config.FACE_CACHE_L1_CAPACITY)
+    loop = asyncio.get_event_loop() # Get the event loop here
     processor = SecurityProcessor(
-        db=db,
-        yolo_model=pp_human_model,
-        face_model=face_model,
-        lpr_model=lpr_model,
-        face_cache=face_cache
+        db=db, 
+        yolo_model=pp_human_model, 
+        face_model=face_model, 
+        vehicle_model=vehicle_model, # Passed here
+        face_cache=face_cache,
+        loop=loop
     )
+    # Note: pp_human_model is passed as 'yolo_model' arg
     
-    # 4. Connect to NATS
+    # 5. Connect to NATS
     print(f"Connecting to NATS at {config.NATS_URL}...")
     nc = await nats.connect(config.NATS_URL)
     
-    # 5. Web Server for Debug Streams
+    # 6. Web Server for Debug Streams
     latest_annotated_frames = {}
     
     async def mjpeg_handler(request):
@@ -198,7 +231,9 @@ async def run():
                 if camera_id in latest_annotated_frames:
                     frame = latest_annotated_frames[camera_id]
                     if frame is not None:
-                        ret, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                        # Convert RGB back to BGR for OpenCV encoding
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                        ret, buffer = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
                         if ret:
                             await response.write(b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                 await asyncio.sleep(0.033)  # ~30 FPS
@@ -238,6 +273,16 @@ async def run():
         }
         
         for row in cameras_query:
+            # Sharding Logic: Filter cameras for this instance
+            if config.TOTAL_INSTANCES > 1:
+                try:
+                    # Deterministic mapping (UUID Hex -> Int -> Modulo)
+                    cam_int_val = int(row[0].replace('-', ''), 16)
+                    if cam_int_val % config.TOTAL_INSTANCES != config.INSTANCE_ID:
+                        continue
+                except Exception as e:
+                    print(f"⚠️ Sharding Error for {row[0]}: {e}. Processing anyway.")
+
             raw_url = row[1]
             # Replace placeholders
             for placeholder, val in replacements.items():
@@ -279,25 +324,26 @@ async def run():
             if rtsp_reader is not None:
                 try:
                     # Get frames from threaded readers
-                    batch_frames, batch_ids = rtsp_reader.get_frames()
+                    batch_frames, batch_originals, batch_ids = rtsp_reader.get_frames()
                     
                     if not batch_frames:
                         await asyncio.sleep(0.05)
                         continue
                     
-                    # Stack into batch array (N, H, W, C)
-                    cpu_batch = np.stack(batch_frames, axis=0)
+                    # Keep frames as lists (different resolutions)
+                    # cpu_batch = np.stack(batch_frames, axis=0) - Not needed
+                    original_batch = batch_originals  # List of originals for model
                     
                     # Get configs for each camera
                     batch_configs = [camera_configs.get(cid, {}) for cid in batch_ids]
                     
                     frame_cnt += 1
                     if frame_cnt % 30 == 0:
-                        print(f"📦 Processing batch: {len(batch_ids)} cameras, Shape={cpu_batch.shape}, Mean={cpu_batch.mean():.1f}")
+                        print(f"📦 Processing batch: {len(batch_ids)} cameras")
                     
                     with PROCESSING_LATENCY.time():
-                        # Process the batch
-                        processed = processor.process_batch(cpu_batch, batch_ids, batch_configs, gpu_frames=None)
+                        # Process the batch (pass ORIGINAL frames to model)
+                        processed = processor.process_batch(original_batch, batch_ids, batch_configs, gpu_frames=None)
                         
                         # Update debug streams
                         if len(processed) == len(batch_ids):

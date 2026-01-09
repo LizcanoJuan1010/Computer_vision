@@ -6,11 +6,12 @@ from .core import BaseProcessor
 from .spatial import SpatialAnalytics
 
 class SecurityProcessor(BaseProcessor):
-    def __init__(self, db, yolo_model, face_model, lpr_model, face_cache=None, publish_callback=None, loop=None):
+    def __init__(self, db, yolo_model, face_model, vehicle_model, face_cache=None, publish_callback=None, loop=None):
         self.db = db
         self.yolo_model = yolo_model
         self.face_model = face_model
-        self.lpr_model = lpr_model
+        self.vehicle_model = vehicle_model # Renamed/Added
+        # self.lpr_model = lpr_model # Removed, now inside vehicle_model
         self.face_cache = face_cache  # FaceCacheLFU instance
         self.publish_callback = publish_callback
         self.loop = loop # Main Event Loop for thread-safe async calls
@@ -20,6 +21,19 @@ class SecurityProcessor(BaseProcessor):
         self.frame_counter = 0
         self.SKIP_FACTOR = 3 # Run Face/LPR every 5th frame
         self.track_state = {} # Cache: {track_id: {'name': str, 'color': tuple, 'last_check': float}}
+
+
+    def save_event_async(self, *args, **kwargs):
+        """Offload DB writes to default executor to avoid blocking inference loop."""
+        if self.loop:
+            # We use run_in_executor to fire and forget (mostly)
+            # Use partial to pass kwargs
+            from functools import partial
+            func = partial(self.db.save_event, *args, **kwargs)
+            self.loop.run_in_executor(None, func)
+        else:
+            # Fallback
+            self.db.save_event(*args, **kwargs)
 
     def _handle_face_event(self, camera_id, name, category, similarity, is_from_global, abs_box):
          # Helper to reduce complexity in main loop
@@ -32,7 +46,7 @@ class SecurityProcessor(BaseProcessor):
          
          if (curr_time - last_face_alert) > 5.0: 
             severity = "HIGH" if category == 'BLACKLIST' else "INFO"
-            self.db.save_event(
+            self.save_event_async(
                 camera_id, 
                 "face_recognition", 
                 name,
@@ -85,10 +99,11 @@ class SecurityProcessor(BaseProcessor):
         # predict() returns a list [PPHumanResult], so we take [0]
         
         # GPU Optimization: Use GPU frames if available
+        # True Batching with Per-Camera Tracking
         if gpu_frames is not None:
-            pp_results_batch = [self.yolo_model.predict(f)[0] for f in gpu_frames]
+             pp_results_batch = self.yolo_model.predict(gpu_frames, camera_ids=camera_ids)
         else:
-            pp_results_batch = [self.yolo_model.predict(f)[0] for f in frames]
+             pp_results_batch = self.yolo_model.predict(frames, camera_ids=camera_ids)
         
         # DEBUG: Print detection stats
         for i, res in enumerate(pp_results_batch):
@@ -98,8 +113,17 @@ class SecurityProcessor(BaseProcessor):
         # Increment counter
         self.frame_counter += 1
         run_heavy_models = (self.frame_counter % self.SKIP_FACTOR == 0)
-
-        # --- 2. Prepare Face Recognition Batch (with Track Caching) ---
+        # --- 2. PP-Vehicle Inference (Batch) ---
+        pp_vehicle_results = []
+        if self.vehicle_model:
+             # Just pass frames (or gpu_frames if PPVehicle supports it, assuming yes)
+             # Note: Using gpu_frames here might need verifying if PPVehicle expects Tensor.
+             # Our wrapper PPVehicleModel currently assumes frames or manually handles conversion.
+             # Let's pass 'frames' (CPU) for safety in this iteration, or 'gpu_frames' if bold.
+             # Safe bet: pass frames.
+             pp_vehicle_results = self.vehicle_model.predict(frames, camera_ids=camera_ids)
+        
+        # --- 3. Prepare Face Recognition Batch (with Track Caching) ---
         face_crops = []
         face_metadata = [] # (batch_index, track_id, bbox, config_data)
         
@@ -311,50 +335,33 @@ class SecurityProcessor(BaseProcessor):
                 
                 face_results_map[batch_idx].append((abs_face_box, name, color))
 
-        # --- 3.5 Batch LPR (License Plate Recognition) ---
-        lpr_results_map = {i: [] for i in range(len(frames))}
-        lpr_frames = []
-        lpr_indices = []
-        
-        if run_heavy_models:
-             for i, frame in enumerate(frames):
-                 cfg = configs[i]
-                 feats = cfg.get("features", []) if cfg else []
-                 if "lpr" in feats:
-                     lpr_indices.append(i)
-                     lpr_frames.append(frame)
-        
-        if lpr_frames:
-             lpr_batch_out = self.lpr_model.predict(lpr_frames, conf=config.DEFAULT_LPR_CONFIDENCE)
-             for idx, lpr_res in zip(lpr_indices, lpr_batch_out):
-                 # lpr_res is YOLO Result object
-                 for box in lpr_res.boxes:
-                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                     conf = float(box.conf[0])
-                     # We assume class 0 is plate, but we accept any detection from this specialized model
-                     plate_text = f"Plate: {conf:.2f}" 
-                     lpr_results_map[idx].append(((x1, y1, x2, y2), plate_text))
-                     
-                     # Async Save Event (High Confidence)
-                     if conf > 0.6:
-                          self.db.save_event(camera_ids[idx], "license_plate", f"plate_detected_{int(time.time())}", severity="INFO")
-                          # Real-Time Notification
-                          if self.publish_callback:
-                              self.publish_callback("events.alarm", {
-                                  "camera_id": camera_ids[idx],
-                                  "event_type": "license_plate",
-                                  "plate_text": plate_text,
-                                  "severity": "INFO",
-                                  "timestamp": time.time(),
-                                  "message": f"License Plate {plate_text} detected"
-                              })
+
 
         # --- 4. Spatial Analysis & Visualization (Per Frame) ---
         processed_frames = []
         
+        TARGET_SIZE = (640, 640)  # Visualization size
+        
         for i, (frame, pp_results) in enumerate(zip(frames, pp_results_batch)):
             camera_id = camera_ids[i]
             cfg = configs[i]
+            
+            # Get original frame dimensions for bbox scaling
+            orig_h, orig_w = frame.shape[:2]
+            
+            # Resize frame for visualization
+            frame_viz = cv2.resize(frame, TARGET_SIZE, interpolation=cv2.INTER_LINEAR)
+            
+            # Calculate scale factors for bbox conversion
+            scale_x = TARGET_SIZE[0] / orig_w
+            scale_y = TARGET_SIZE[1] / orig_h
+            
+            # Scale bboxes in pp_results
+            if hasattr(pp_results, 'boxes') and len(pp_results.boxes) > 0:
+                pp_results.boxes = [
+                    [int(b[0] * scale_x), int(b[1] * scale_y), int(b[2] * scale_x), int(b[3] * scale_y)]
+                    for b in pp_results.boxes
+                ]
             
             # Setup Defaults
             features = cfg.get("features", []) if cfg else ["face", "line_crossing", "intrusion"]
@@ -387,20 +394,70 @@ class SecurityProcessor(BaseProcessor):
             if icfg:
                  intrusion_classes = icfg.get("classes", config.DEFAULT_INTRUSION_CLASSES)
             
+            # --- PROCESS PP-VEHICLE RESULTS ---
+            if i < len(pp_vehicle_results):
+                 veh_res = pp_vehicle_results[i]
+                 
+                 # Annotate vehicles
+                 if hasattr(veh_res, 'boxes'):
+                     for k, bbox in enumerate(veh_res.boxes):
+                         cls_id = veh_res.cls[k]
+                         score = veh_res.conf[k]
+                         x1, y1, x2, y2 = map(int, bbox)
+                         
+                         # Draw Box (Blue for Vehicle)
+                         color = (255, 0, 0) 
+                         cv2.rectangle(frame_viz, (x1, y1), (x2, y2), color, 2)
+                         
+                         label = "Vehicle"
+                         if cls_id == 0: label = "Car"
+                         elif cls_id == 1: label = "Truck"
+                         elif cls_id == 2: label = "Bus"
+                         elif cls_id == 3: label = "Moto"
+                         
+                         # Check LPR
+                         if veh_res.plates:
+                             # Use simple index matching if list, or key if dict
+                             plate_text = veh_res.plates.get(k) 
+                             if plate_text:
+                                 label += f" [{plate_text}]"
+                                 # Save Event
+                                 curr_t = time.time()
+                                 if not hasattr(self, 'lpr_cooldowns'): self.lpr_cooldowns = {}
+                                 if camera_id not in self.lpr_cooldowns: self.lpr_cooldowns[camera_id] = {}
+                                 
+                                 last_lpr = self.lpr_cooldowns[camera_id].get(plate_text, 0)
+                                 if (curr_t - last_lpr) > 10.0: # 10s debounce
+                                     print(f"💾 Saving LPR Event: {plate_text}", flush=True)
+                                     self.save_event_async(
+                                         camera_id,
+                                         "lpr",
+                                         plate_text, # Track ID = Plate
+                                         confidence=float(score),
+                                         bbox=[x1, y1, x2, y2],
+                                         severity="INFO"
+                                     )
+                                     self.lpr_cooldowns[camera_id][plate_text] = curr_t
+                                 
+                         cv2.putText(frame_viz, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+            # --- END VEHICLE RESULTS ---
+
+            cfg = config_data # Alias for below
             lcfg = cfg.get("line_crossing_config") if cfg else None
             if lcfg:
                  line_classes = lcfg.get("classes", config.DEFAULT_LINE_CROSSING_CLASSES)
             
             spatial_cam.set_classes(intrusion_classes, line_classes)
             
+            # Use TARGET_SIZE for spatial zones since frame_viz is resized
             if "line_crossing" in features and "line_crossing" in zones and zones["line_crossing"]:
-                 spatial_cam.set_line_zone(zones["line_crossing"].get("points", []), zones["line_crossing"].get("trigger", "in_out"), (frame.shape[1], frame.shape[0]))
+                 spatial_cam.set_line_zone(zones["line_crossing"].get("points", []), zones["line_crossing"].get("trigger", "in_out"), TARGET_SIZE)
             if "intrusion" in features and "intrusion" in zones and zones["intrusion"]:
-                 spatial_cam.set_polygon_zone(zones["intrusion"].get("points", []), (frame.shape[1], frame.shape[0]))
+                 spatial_cam.set_polygon_zone(zones["intrusion"].get("points", []), TARGET_SIZE)
 
-            # Update Tracker & Spatial Analysis
+            # Update Tracker & Spatial Analysis (using resized frame)
             # pp_results has .boxes, .cls, .id, and tracked objects
-            result = spatial_cam.update(frame, pp_results)
+            result = spatial_cam.update(frame_viz, pp_results)
             annotated_frame = result.annotated_frame
             
             # --- PP-Human Action Recognition (Fight/Fall) ---
@@ -428,7 +485,7 @@ class SecurityProcessor(BaseProcessor):
                         last = self.action_cooldowns[camera_id].get(event_type, 0)
                         if (current_time - last) > 5.0:
                             print(f"🚨 ACTION DETECTION [{camera_id}]: {action.upper()} 🚨")
-                            self.db.save_event(camera_id, event_type, str(tid), severity="CRITICAL")
+                            self.save_event_async(camera_id, event_type, str(tid), severity="CRITICAL")
                             self.action_cooldowns[camera_id][event_type] = current_time
                             
                             if self.publish_callback:
@@ -458,7 +515,7 @@ class SecurityProcessor(BaseProcessor):
                           current_time = time.time()
                           if (current_time - last) > 5.0:
                               print(f"🚨 GLOBAL ACTION ALERT [{camera_id}]: FIGHT DETECTED 🚨")
-                              self.db.save_event(camera_id, "fight_detection", "global", severity="CRITICAL")
+                              self.save_event_async(camera_id, "fight_detection", "global", severity="CRITICAL")
                               self.action_cooldowns[camera_id]["fight_detection"] = current_time
                               
                               if self.publish_callback:
@@ -514,7 +571,7 @@ class SecurityProcessor(BaseProcessor):
                      last = self.alert_cooldowns[camera_id].get(tid, 0)
                      if last == 0 or (curr_time - last) > debounce:
                          print(f"🚨 ALERT [{camera_id}]: Intrusion! 🚨")
-                         self.db.save_event(camera_id, "intrusion", tid, severity="HIGH") # Non-blocking
+                         self.save_event_async(camera_id, "intrusion", tid, severity="HIGH") # Non-blocking
                          self.alert_cooldowns[camera_id][tid] = curr_time
                          
                          # Real-Time Notification
@@ -538,12 +595,7 @@ class SecurityProcessor(BaseProcessor):
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(annotated_frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-            # D. LPR Visualization
-            if "lpr" in features:
-                lpr_res = lpr_results_map[i]
-                for ((x1, y1, x2, y2), text) in lpr_res:
-                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (255, 0, 255), 2) # Magenta
-                    cv2.putText(annotated_frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+
 
             processed_frames.append(annotated_frame)
 
@@ -563,41 +615,4 @@ class SecurityProcessor(BaseProcessor):
 
     # _draw_yolo_results removed as it is replaced by SpatialAnalytics visualization
 
-    def _process_faces(self, frame, faces, config_data=None):
-        # Determine Threshold
-        threshold = config.SIMILARITY_THRESHOLD
-        if config_data and "face_config" in config_data:
-             fc = config_data["face_config"]
-             if isinstance(fc, dict) and "threshold" in fc:
-                 threshold = float(fc["threshold"])
 
-        for face in faces:
-            bbox = face.bbox.astype(int)
-            embedding = face.embedding
-            
-            # Search in DB
-            match = self.db.find_nearest_face(embedding)
-            
-            name = "Unknown"
-            color = (0, 0, 255) # Red
-            
-            if match:
-                db_name, distance = match
-                # distance is cosine distance (0 to 2), usually 0 to 1 for normalized vectors
-                # If similarity > threshold => distance < (1 - threshold)? 
-                # InsightFace typically returns cosine distance or L2. 
-                # Assuming standard cosine distance where smaller is better?
-                # Actually arcface/insightface returns similarity score usually or distance?
-                # The original code was: distance < (1 - config.SIMILARITY_THRESHOLD)
-                # This implies distance is "dissimilarity" (0=same, 1=ortho, 2=opposite).
-                # So if we want similarity 0.6, we accept distance < 0.4.
-                
-                req_dist = 1.0 - threshold
-                
-                if distance < req_dist:
-                    name = db_name
-                    color = (0, 255, 0) # Green
-            
-            # Draw BBox and Name
-            cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), color, 2)
-            cv2.putText(frame, name, (bbox[0], bbox[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)

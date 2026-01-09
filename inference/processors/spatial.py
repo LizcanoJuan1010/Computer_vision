@@ -138,22 +138,25 @@ class SpatialAnalytics:
         """
         Draws zones, lines, and annotations on the frame.
         """
+        # 1. Initialize annotated_frame ALWAYS
+        annotated_frame = frame.copy()
+
         # DEBUG SPATIAL
         if len(detections) > 0:
+             # Just a pass to avoid indentation issues with print
              print(f"DEBUG: Spatial received {len(detections)} detections", flush=True)
-
-        annotated_frame = frame.copy()
+             pass
         
-        # 1. Draw Intrusion Zone (Polygon)
+        # 2. Draw Intrusion Zone (Polygon)
         if self.polygon_annotator is not None:
             annotated_frame = self.polygon_annotator.annotate(scene=annotated_frame)
 
-        # 2. Draw Line Zones
+        # 3. Draw Line Zones
         if self.line_zones:
             for zone in self.line_zones:
                 annotated_frame = self.line_annotator.annotate(frame=annotated_frame, line_counter=zone)
 
-        # 3. Draw Detections
+        # 4. Draw Detections
         labels = []
         for i in range(len(detections)):
              tid = detections.tracker_id[i] if detections.tracker_id is not None else "N/A"
@@ -162,7 +165,7 @@ class SpatialAnalytics:
 
         # Split detections for coloring (intrusion vs normal)
         intrusion_ids = []
-        if self.polygon_zone is not None and detections.tracker_id is not None:
+        if self.polygon_zone is not None and len(detections) > 0 and detections.tracker_id is not None:
             mask_intrusion_classes = np.isin(detections.class_id, self.intrusion_classes)
             detections_for_intrusion_check = detections[mask_intrusion_classes]
             
@@ -192,8 +195,10 @@ class SpatialAnalytics:
                 annotated_frame = self.red_annotator.annotate(scene=annotated_frame, detections=detections_intrusion)
                 annotated_frame = self.red_label_annotator.annotate(scene=annotated_frame, detections=detections_intrusion, labels=labels_intrusion)
         else:
-            annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=detections)
-            annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
+            # Normal annotation for all
+            if len(detections) > 0:
+                annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=detections)
+                annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
 
         return annotated_frame
 
@@ -223,21 +228,9 @@ class SpatialAnalytics:
         else:
             detections = sv.Detections.empty()
 
-        if len(detections) > 0:
-             # DEBUG: Print incoming classes
-             # unique_classes = np.unique(detections.class_id)
-             # print(f"DEBUG: Spatial Input Classes: {unique_classes} | Expecting: {self.intrusion_classes}", flush=True)
-             pass
-
         # Filter detections for relevant classes (Union)
         relevant_classes = list(set(self.intrusion_classes + self.line_crossing_classes))
-        
-        # DEBUG: Check if we are filtering everything
         mask = np.isin(detections.class_id, relevant_classes)
-        if len(detections) > 0 and np.sum(mask) == 0:
-             unique_classes = np.unique(detections.class_id)
-             print(f"⚠️ Spatial Filter Warning: Dropping ALL detections. Incoming Classes: {unique_classes} vs Allowed: {relevant_classes}", flush=True)
-
         detections = detections[mask]
 
         # --- Line Crossing Logic ---
@@ -269,47 +262,11 @@ class SpatialAnalytics:
             if np.any(is_inside) and detections_intrusion_logic.tracker_id is not None:
                 intrusion_ids = detections_intrusion_logic.tracker_id[is_inside].tolist()
 
-        # --- Annotation ---
-        labels = []
-        for i in range(len(detections)):
-             tid = detections.tracker_id[i] if detections.tracker_id is not None else "N/A"
-             class_id = detections.class_id[i]
-             labels.append(f"#{tid} C{class_id}")
-
-        # Split detections for coloring
-        if intrusion_ids and detections.tracker_id is not None:
-            intrusion_mask = np.isin(detections.tracker_id, intrusion_ids)
-            normal_mask = ~intrusion_mask
-            
-            detections_intrusion = detections[intrusion_mask]
-            detections_normal = detections[normal_mask]
-            
-            labels_intrusion = [lbl for i, lbl in enumerate(labels) if intrusion_mask[i]]
-            labels_normal = [lbl for i, lbl in enumerate(labels) if normal_mask[i]]
-            
-            if len(detections_normal) > 0:
-                frame = self.box_annotator.annotate(scene=frame, detections=detections_normal)
-                frame = self.label_annotator.annotate(scene=frame, detections=detections_normal, labels=labels_normal)
-            
-            if len(detections_intrusion) > 0:
-                if not hasattr(self, "red_annotator"): 
-                    self.red_annotator = sv.BoxAnnotator(color=sv.Color.RED, thickness=4)
-                    self.red_label_annotator = sv.LabelAnnotator(color=sv.Color.RED, text_thickness=1, text_scale=0.5)
-                frame = self.red_annotator.annotate(scene=frame, detections=detections_intrusion)
-                frame = self.red_label_annotator.annotate(scene=frame, detections=detections_intrusion, labels=labels_intrusion)
-        else:
-            frame = self.box_annotator.annotate(scene=frame, detections=detections)
-            frame = self.label_annotator.annotate(scene=frame, detections=detections, labels=labels)
-        
-        if self.line_zones:
-            for zone in self.line_zones:
-                frame = self.line_annotator.annotate(frame=frame, line_counter=zone)
-                
-        if self.polygon_annotator is not None:
-            frame = self.polygon_annotator.annotate(scene=frame)
+        # --- Annotation (Call simplified annotate) ---
+        annotated_frame = self.annotate(frame, detections)
         
         return SpatialResult(
-            annotated_frame=frame,
+            annotated_frame=annotated_frame,
             line_counts=(total_in, total_out),
             intrusion_events=intrusion_ids
         )

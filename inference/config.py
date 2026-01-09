@@ -36,6 +36,10 @@ class Config:
     # Logic
     SIMILARITY_THRESHOLD = 0.85 
 
+    # Scalability (Sharding)
+    INSTANCE_ID = int(os.getenv("INSTANCE_ID", "0"))
+    TOTAL_INSTANCES = int(os.getenv("TOTAL_INSTANCES", "1"))
+
     # Optimization
     USE_TENSORRT = os.getenv("USE_TENSORRT", "true").lower() == "true"
     TENSORRT_PRECISION = os.getenv("TENSORRT_PRECISION", "fp16") # fp16, fp32, int8 

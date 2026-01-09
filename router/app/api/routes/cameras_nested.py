@@ -249,7 +249,7 @@ async def create_camera_ai_zone(
     valid_event_types = [
         'intrusion', 'loitering', 'line_crossing', 'abandoned_object', 'crowd_detection', 'face',
         'fall_detection', 'fight_detection', 'compliance_smoking', 'compliance_calling',
-        'forensics', 'reid'
+        'forensics', 'reid', 'lpr'
     ]
     if zone_config.event_type not in valid_event_types:
         raise HTTPException(
@@ -347,7 +347,7 @@ async def update_camera_ai_zone(
         valid_event_types = [
             'intrusion', 'loitering', 'line_crossing', 'abandoned_object', 'crowd_detection', 'face',
             'fall_detection', 'fight_detection', 'compliance_smoking', 'compliance_calling',
-            'forensics', 'reid'
+            'forensics', 'reid', 'lpr'
         ]
         if update_data['event_type'] not in valid_event_types:
             raise HTTPException(

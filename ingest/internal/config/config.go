@@ -47,7 +47,7 @@ func Load() *Config {
 		NatsURL:      getEnv("NATS_URL", "nats://localhost:4222"),
 		ResizeWidth:  getEnvInt("RESIZE_WIDTH", 640),
 		ResizeHeight: getEnvInt("RESIZE_HEIGHT", 360),
-		TargetFPS:    getEnvFloat("TARGET_FPS", 5.0),
+		TargetFPS:    getEnvFloat("TARGET_FPS", 30.0),
 		MetricsPort:  getEnv("METRICS_PORT", "8080"),
 		MotionThresh: 0.02,
 		BufferSize:   10,

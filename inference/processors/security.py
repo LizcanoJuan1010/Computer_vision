@@ -231,6 +231,7 @@ class SecurityProcessor(BaseProcessor):
 
         # --- 3. Batch Face Recognition ---
         if face_crops:
+            print(f"⚡ DEBUG: Analyzing {len(face_crops)} detected faces...", flush=True)
             # Predict all faces at once
             all_faces_analysis = self.face_model.predict(face_crops)
             
@@ -406,8 +407,8 @@ class SecurityProcessor(BaseProcessor):
                          x1, y1, x2, y2 = map(int, bbox)
                          
                          # Draw Box (Blue for Vehicle)
-                         color = (255, 0, 0) 
-                         cv2.rectangle(frame_viz, (x1, y1), (x2, y2), color, 2)
+                         # color = (255, 0, 0) 
+                         # cv2.rectangle(frame_viz, (x1, y1), (x2, y2), color, 2)
                          
                          label = "Vehicle"
                          if cls_id == 0: label = "Car"
@@ -439,7 +440,7 @@ class SecurityProcessor(BaseProcessor):
                                      )
                                      self.lpr_cooldowns[camera_id][plate_text] = curr_t
                                  
-                         cv2.putText(frame_viz, label, (x1, y1-5), 1, 0.5, color, 2)
+                         # cv2.putText(frame_viz, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             # --- END VEHICLE RESULTS ---
 
             cfg = config_data # Alias for below
@@ -499,8 +500,8 @@ class SecurityProcessor(BaseProcessor):
                                 })
                             
                             # Visual Alert on Frame
-                            cv2.putText(annotated_frame, f"ACTION: {action.upper()}", (50, 50), 
-                                        1, 1.5, (0, 0, 255), 4)
+                            # cv2.putText(annotated_frame, f"ACTION: {action.upper()}", (50, 50), 
+                            #             cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
             
             # --- Global Events (e.g. Video Fight Detection) ---
             if hasattr(pp_results, 'global_events') and pp_results.global_events:
@@ -528,8 +529,8 @@ class SecurityProcessor(BaseProcessor):
                                       "message": "Fight Detected (Video Analysis)"
                                   })
                               
-                              cv2.putText(annotated_frame, "FIGHT DETECTED", (50, 100), 
-                                          1, 1.5, (0, 0, 255), 4)
+                              # cv2.putText(annotated_frame, "FIGHT DETECTED", (50, 100), 
+                              #            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
 
             # --- ReID Processing (Forensic Search) ---
             if hasattr(pp_results, 'reid_features') and pp_results.reid_features:
@@ -585,15 +586,22 @@ class SecurityProcessor(BaseProcessor):
                                  "message": f"Intrusion detected on {camera_id}"
                              })
                  
-                 cv2.putText(annotated_frame, "INTRUSION DETECTED!", (10, 150), 1, 1.0, (0, 0, 255), 3)
+                 # cv2.putText(annotated_frame, "INTRUSION DETECTED!", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
-            # C. Face Recognition (Visualization)
+            # C. Face Recognition (Visualization Disabled for Logic Verify)
             if "face" in features:
+                processed_any_face = False
                 faces_data = face_results_map[i]
                 for (bbox, name, color) in faces_data:
-                    x1, y1, x2, y2 = bbox
-                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(annotated_frame, name, (x1, y1 - 10), 1, 0.8, color, 2)
+                    # Logic Check Log
+                    processed_any_face = True
+                    # cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                    # cv2.putText(annotated_frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                
+                if processed_any_face:
+                     # Log one of the faces for verification
+                     n = faces_data[0][1]
+                     print(f"🔍 Face Logic Verify [{camera_id}]: Recognized '{n}'", flush=True)
 
 
 

@@ -136,37 +136,108 @@ class SpatialAnalytics:
 
     def annotate(self, frame: np.ndarray, detections: sv.Detections) -> np.ndarray:
         """
-        Draws zones, lines, and annotations on the frame.
+        Draws zones, lines, and annotations on the frame using PIL to avoid SIGILL crashes.
         """
-        # DISABLE ALL DRAWING TO TEST STABILITY (SIGILL CHECK)
-        annotated_frame = frame.copy()
-        
-        # try:
-        #      h, w = annotated_frame.shape[:2]
-        #      print(f"DEBUG: Frame Valid? Shape: {annotated_frame.shape} Dtype: {annotated_frame.dtype} | Detection Count: {len(detections.xyxy)}", flush=True)
+        from PIL import Image, ImageDraw, ImageFont
+        import numpy as np
+
+        # 1. Convert to PIL (BGR -> RGB)
+        # Check if frame is valid
+        if frame is None or frame.size == 0:
+            return frame
+            
+        try:
+             # OpenCV is BGR, PIL needs RGB
+             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+             pil_image = Image.fromarray(frame_rgb)
+             draw = ImageDraw.Draw(pil_image)
              
-        #      for i, xyxy in enumerate(detections.xyxy):
-        #          x1, y1, x2, y2 = map(int, xyxy)
-                 
-        #          # LOG RAW COORDS
-        #          # print(f"DEBUG: Box {i} RAW: {x1, y1, x2, y2}", flush=True)
-                 
-        #          # CLAMP
-        #          x1 = max(0, min(w, x1))
-        #          y1 = max(0, min(h, y1))
-        #          x2 = max(0, min(w, x2))
-        #          y2 = max(0, min(h, y2))
-                 
-        #          # print(f"DEBUG: Box {i} CLAMPED: {x1, y1, x2, y2}", flush=True)
+             # Load a font (fallback to default if arial unavailable)
+             try:
+                 font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 15)
+             except:
+                 font = ImageFont.load_default()
 
-        #          # Draw
-        #          # cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        #          # cv2.putText(annotated_frame, "MANUAL", (x1, y1-20), 1, 1, (0, 255, 0), 2)
-        # except Exception as e:
-        #      print(f"❌ ERROR drawing manual box: {e}", flush=True)
+             width, height = pil_image.size
 
-        # print(f"DEBUG: Skipping Draw. Frame Shape: {annotated_frame.shape}", flush=True)
-        return annotated_frame
+             # 2. Draw Intrusion Zone (Polygon)
+             if self.polygon_zone is not None and len(self.current_polygon_points) > 2:
+                  # Convert points to flat list of tuples for PIL
+                  # self.polygon_zone.polygon is a numpy array [[x,y], [x,y]]
+                  poly_points = [tuple(p) for p in self.polygon_zone.polygon]
+                  
+                  # Draw Polygon (Red outline, semi-transparent fill is hard in PIL simple, just outline for now)
+                  draw.polygon(poly_points, outline=(255, 0, 0), width=3)
+
+             # 3. Draw Line Zones
+             if self.line_zones:
+                 for zone in self.line_zones:
+                     # zone.vector is sv.Vector(start=Point(x,y), end=Point(x,y))
+                     start = (int(zone.vector.start.x), int(zone.vector.start.y))
+                     end = (int(zone.vector.end.x), int(zone.vector.end.y))
+                     draw.line([start, end], fill=(255, 255, 0), width=3)
+                     
+                     # Draw Counts
+                     # Calculate mid point
+                     mid_x = (start[0] + end[0]) // 2
+                     mid_y = (start[1] + end[1]) // 2
+                     text = f"In: {zone.in_count} Out: {zone.out_count}"
+                     draw.text((mid_x, mid_y), text, fill=(255, 255, 255), font=font)
+
+             # 4. Draw Detections
+             labels = []
+             for i in range(len(detections)):
+                  tid = detections.tracker_id[i] if detections.tracker_id is not None else "N/A"
+                  class_id = detections.class_id[i]
+                  labels.append(f"#{tid}")
+
+             # Identify Intrusion IDs for coloring
+             intrusion_ids = []
+             if self.polygon_zone is not None and len(detections) > 0 and detections.tracker_id is not None:
+                mask_intrusion_classes = np.isin(detections.class_id, self.intrusion_classes)
+                detections_for_intrusion_check = detections[mask_intrusion_classes]
+                if len(detections_for_intrusion_check) > 0:
+                    is_inside = self.polygon_zone.trigger(detections=detections_for_intrusion_check)
+                    if np.any(is_inside):
+                        intrusion_ids = detections_for_intrusion_check.tracker_id[is_inside].tolist()
+                        
+             # Draw Boxes
+             for i, xyxy in enumerate(detections.xyxy):
+                 x1, y1, x2, y2 = map(int, xyxy)
+                 
+                 # Clamp
+                 x1 = max(0, min(width, x1))
+                 y1 = max(0, min(height, y1))
+                 x2 = max(0, min(width, x2))
+                 y2 = max(0, min(height, y2))
+                 
+                 tid = detections.tracker_id[i] if detections.tracker_id is not None else None
+                 
+                 # Color Logic
+                 color = (0, 255, 0) # Green (Safe)
+                 if tid is not None and tid in intrusion_ids:
+                     color = (255, 0, 0) # Red (Intrusion)
+                 
+                 # 1. Draw Rectangle
+                 draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+                 
+                 # 2. Draw Label Background & Text
+                 label = labels[i]
+                 # text_bbox = draw.textbbox((x1, y1), label, font=font) # Requires recent Pillow
+                 # Simple rect for text
+                 draw.rectangle([x1, y1-20, x1+60, y1], fill=color)
+                 draw.text((x1+5, y1-18), label, fill=(255, 255, 255), font=font)
+
+             # Convert back to BGR for OpenCV pipeline
+             annotated_numpy = np.array(pil_image)
+             annotated_frame = cv2.cvtColor(annotated_numpy, cv2.COLOR_RGB2BGR)
+             
+             return annotated_frame
+             
+        except Exception as e:
+             print(f"❌ ERROR drawing with PIL: {e}", flush=True)
+             return frame
+
 
     def update(self, frame: np.ndarray, detections_input: Any) -> SpatialResult:
         """

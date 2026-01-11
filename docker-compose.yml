@@ -131,6 +131,8 @@ services:
       # NVIDIA Support
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Bypass NVIDIA Container SM Version Check for Blackwell (50-series)
+      - MAXSMVER=100
     ipc: host
     # No need for symlinks with NGC container - everything is pre-configured
     ports:

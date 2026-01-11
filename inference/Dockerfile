@@ -78,7 +78,7 @@ COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --break-system-packages -r requirements.txt || true
 
 COPY . /app/inference
-COPY ./weights/ /app/weights/
+# COPY ./weights/ /app/weights/
 
 # Ensure start script is executable
 RUN chmod +x /app/inference/start.sh

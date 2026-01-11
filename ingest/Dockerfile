@@ -27,7 +27,6 @@ WORKDIR /app
 COPY --from=builder /app/ingest_server .
 
 # Default Env Vars
-ENV VIDEO_SOURCE="../test_video.mp4"
 ENV NATS_URL="nats://localhost:4222"
 
 CMD ["./ingest_server"]

@@ -54,21 +54,59 @@ func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame,
 	postMotionDuration := 5 * time.Second
 
 	for frame := range in {
-		// 1. Resize (Stretch to Target)
-		// Removing letterboxing to align coordinates (0-1 content = 0-1 canvas)
+		// 1. Resize (Letterbox)
+		// Logic ported from legacy sizing.py: Scale to fit within target box, pad with grey.
 
-		targetW, targetH := cfg.ResizeWidth, cfg.ResizeHeight
-
-		// Resize directly to target dimensions
-		// imgResized is reused, but we need to ensure it's the right size/type
-		if imgResized.Cols() != targetW || imgResized.Rows() != targetH {
-			imgResized.Close()
-			imgResized = gocv.NewMatWithSize(targetH, targetW, gocv.MatTypeCV8UC3)
+		// ✅ Use per-camera resize settings (dynamic based on use case)
+		// Priority: Camera-specific > Global config
+		resizeWidth := cam.ResizeWidth
+		resizeHeight := cam.ResizeHeight
+		if resizeWidth == 0 {
+			resizeWidth = cfg.ResizeWidth
+		}
+		if resizeHeight == 0 {
+			resizeHeight = cfg.ResizeHeight
 		}
 
-		gocv.Resize(frame.Mat, &imgResized, image.Pt(targetW, targetH), 0, 0, gocv.InterpolationLinear)
+		targetW, targetH := float64(resizeWidth), float64(resizeHeight)
+		origRows, origCols := frame.Mat.Rows(), frame.Mat.Cols()
+		origH, origW := float64(origRows), float64(origCols)
+		
+		scale := min(targetH/origH, targetW/origW)
+		nw, nh := int(origW*scale), int(origH*scale)
+		
+		// Resize original to new scaled dimensions
+		scaled := gocv.NewMat()
+		gocv.Resize(frame.Mat, &scaled, image.Pt(nw, nh), 0, 0, gocv.InterpolationLinear)
+		
+		// Create target canvas (grey background)
+		// Re-use imgResized if possible, but for simplicity of letterboxing logic involving ROIs,
+		// we might need to be careful. imgResized is our target 'canvas'.
+		// Reset canvas to grey (128)
+		imgResized.SetTo(gocv.NewScalar(128, 128, 128, 0))
+		
+		// Make sure imgResized is the correct size first (it should be initialized once or reused)
+		if imgResized.Cols() != resizeWidth || imgResized.Rows() != resizeHeight {
+			// Re-allocate if size changed (or first run)
+			imgResized.Close()
+			imgResized = gocv.NewMatWithSize(resizeHeight, resizeWidth, gocv.MatTypeCV8UC3)
+			imgResized.SetTo(gocv.NewScalar(128, 128, 128, 0))
+		} else {
+             // Just clear it
+             imgResized.SetTo(gocv.NewScalar(128, 128, 128, 0))
+        }
+		
+		// Paste scaled image into center
+		top := (int(targetH) - nh) / 2
+		left := (int(targetW) - nw) / 2
+		
+		// Define ROI on canvas
+		roi := imgResized.Region(image.Rect(left, top, left+nw, top+nh))
+		scaled.CopyTo(&roi)
+		
+		scaled.Close()
+		roi.Close()
 
-		// Legacy letterbox/padding code removed for coordinate alignment
 
 		// Update FrameHub for Streaming/Snapshots
 		// We use imgResized (which is the standardized size)
@@ -78,7 +116,7 @@ func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame,
 		mog2.Apply(imgResized, &fgMask)
 
 		nonZero := gocv.CountNonZero(fgMask)
-		totalPixels := cfg.ResizeWidth * cfg.ResizeHeight
+		totalPixels := resizeWidth * resizeHeight
 		changePct := float64(nonZero) / float64(totalPixels)
 
 		// Get a Mat from the pool
@@ -94,7 +132,6 @@ func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame,
 		}
 
 		isMotion := changePct >= cfg.MotionThresh
-		isMotion = true // DEBUG: Force continuous streaming for inference debugging
 
 		if isMotion {
 			lastMotionTime = time.Now()

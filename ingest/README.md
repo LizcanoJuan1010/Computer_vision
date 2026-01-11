@@ -24,7 +24,7 @@ Set these environment variables to configure the service:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `VIDEO_SOURCE` | `../test_video.mp4` | Path to video file or RTSP URL (e.g., `rtsp://user:pass@ip:554/stream`) |
+| `VIDEO_SOURCE` | `rtsp://user:pass@ip:554/stream` | RTSP URL (e.g., `rtsp://user:pass@ip:554/stream`) |
 | `NATS_URL` | `nats://localhost:4222` | NATS Server URL |
 | `CAMERA_ID` | `001` | Unique ID for the camera (used in NATS topic) |
 | `TARGET_FPS` | `5.0` | FPS limit for ingestion |

@@ -1,227 +1,280 @@
-from .base import BaseModel
-import numpy as np
-import cv2
+"""
+PP-Vehicle Model - Vehicle Detection and Plate Recognition
+Uses same RT-DETR model as PP-Human, filtered for vehicle classes
+"""
 import os
+import cv2
+import numpy as np
 import paddle
+from ..config import config
+from .lpr import LPRModel
 
+# COCO class IDs for vehicles
+VEHICLE_CLASSES = {
+    2: 'car',
+    5: 'bus', 
+    7: 'truck',
+    3: 'motorcycle'
+}
 
-# Re-use PPHuman result structure or create PPVehicle one?
-# Using PPHumanResult for consistency in SecurityProcessor (boxes, id, cls, conf)
-# We will store Plate Text in 'actions' or separate field? 
-# PPHumanResult has 'actions' (dict track_id -> action). We can abuse this: track_id -> "Plate: XYZ"
-# Or better, create PPVehicleResult.
 
 class PPVehicleResult:
+    """Result container for vehicle detection"""
     def __init__(self):
-        self.boxes = [] # [x1, y1, x2, y2]
-        self.id = []    # [track_id]
-        self.cls = []   # [class_id]
-        self.conf = []  # [score]
-        self.plates = {} # track_id -> str (Plate Number)
+        self.boxes = []      # [[x1,y1,x2,y2], ...]
+        self.id = []         # [track_id, ...]
+        self.cls = []        # [class_id, ...]
+        self.conf = []       # [score, ...]
+        self.plates = {}     # {track_id/index: plate_text}
+        self.vehicle_types = {} # {track_id/index: vehicle_type}
 
-class PPVehicleModel(BaseModel):
-    def __init__(self, model_dir, lpr_model=None):
-        self.model_dir = model_dir
+
+class PPVehicleModel:
+    """
+    Vehicle Detection using RT-DETR + LPR
+    
+    Shares the same RT-DETR model as human detection but filters
+    for vehicle classes and runs LPR on each detected vehicle.
+    """
+    
+    def __init__(self, model_dir=None, lpr_model=None):
+        self.model_dir = model_dir or "/app/weights/human_det/exported"
         self.predictor = None
-        self.lpr_model = lpr_model # Instance of LPRModel
-        self.tracker = None # We need a tracker instance (ByteTrack/OCSORT)
-        self.trackers = {} # Per-Camera Tracker
-
+        self.lpr_model = lpr_model
+        self.input_size = (640, 640)
+        self.conf_threshold = 0.4
+        self._next_track_id = 10000  # Start high to avoid collision with human IDs
+        self._track_history = {}
+        
     def load(self):
-        print(f"Loading PP-Vehicle from {self.model_dir}...")
+        """Load RT-DETR model for vehicle detection"""
+        print(f"🚗 Loading PP-Vehicle (RT-DETR) from {self.model_dir}...", flush=True)
         
-        # 1. Config Tracker
-        # We can reuse the tracker config from global config or hardcode defaults for Vehicle
-        # Using JDETracker or OCSORT. 
-        # For simplicity, we'll instantiate the predictor and extract its tracker if possible,
-        # OR just use the Detector and manage tracking manually like in pp_human.
-        
-        # Load Predictor (PaddleDetection Logic)
-        # We need to manually construct it because 'create_predictor' assumes config file
-        # But we have the exported model (model.pdmodel).
-        
-        # We can allow 'create_predictor' to load just the model? 
-        # Usually we use: pred = create_predictor(args)
-        # But args needs many flags.
-        
-        # HACK: We will use the same "MockFlags" approach as PPHuman if needed.
-        # But let's try to just load the inference model directly for Detection
-        # and attach a Tracker.
-        
+        # Check for exported model
         model_file = os.path.join(self.model_dir, "model.pdmodel")
         params_file = os.path.join(self.model_dir, "model.pdiparams")
         
         if not os.path.exists(model_file):
-            print(f"❌ Standard path not found, checking subfolder...")
-            # Unzip usually creates a subfolder 'mot_ppyoloe_s_36e_ppvehicle'
-            sub = "mot_ppyoloe_s_36e_ppvehicle"
-            model_file = os.path.join(self.model_dir, sub, "model.pdmodel")
-            params_file = os.path.join(self.model_dir, sub, "model.pdiparams")
+            # Try alternate paths
+            alt_paths = [
+                "/app/weights/human_det",
+                "/app/PaddleDetection/output_inference/rtdetr_r18vd_6x_coco"
+            ]
+            for alt in alt_paths:
+                model_file = os.path.join(alt, "model.pdmodel")
+                params_file = os.path.join(alt, "model.pdiparams")
+                if os.path.exists(model_file):
+                    self.model_dir = alt
+                    break
+                    
+        if not os.path.exists(model_file):
+            print(f"❌ Vehicle model not found - will use stub mode", flush=True)
+            return
             
-        config = paddle.inference.Config(model_file, params_file)
-        config.disable_gpu() # Avoid CUDNN Conflict
-        config.enable_mkldnn()
-        config.set_cpu_math_library_num_threads(4)
-        config.switch_ir_optim(True)
-        config.enable_memory_optim()
-        
-        self.predictor = paddle.inference.create_predictor(config)
-        
-        # Initialize Tracker Prototype (OCSORT)
-        # We need 'ppol.tracking.ocsort_tracker' or similar. 
-        # Attempt to import from local lib or paddledet
         try:
-            from pp_tracking.python.mot.tracker import OCSORTTracker
-            self.tracker_proto = OCSORTTracker(max_age=30, min_hits=3, iou_threshold=0.3)
-        except ImportError:
-            # Fallback or Stub
-            print("⚠️ Tracker import failed. Using simpler logic or failing.")
-            self.tracker_proto = None
-
-        print("PP-Vehicle Loaded.")
+            # Configure Paddle Inference
+            paddle_config = paddle.inference.Config(model_file, params_file)
+            
+            if paddle.is_compiled_with_cuda():
+                paddle_config.enable_use_gpu(512, 0)  # 512MB for vehicle
+                
+                if config.USE_TENSORRT:
+                    paddle_config.enable_tensorrt_engine(
+                        workspace_size=1 << 29,  # 512MB
+                        max_batch_size=1,
+                        min_subgraph_size=3,
+                        precision_mode=paddle.inference.PrecisionType.Half,
+                        use_static=False,
+                        use_calib_mode=False
+                    )
+                    
+                paddle_config.enable_memory_optim()
+            else:
+                paddle_config.disable_gpu()
+                paddle_config.enable_mkldnn()
+                
+            self.predictor = paddle.inference.create_predictor(paddle_config)
+            print(f"✅ PP-Vehicle Loaded.", flush=True)
+            
+        except Exception as e:
+            print(f"❌ Failed to load PP-Vehicle: {e}", flush=True)
+            self.predictor = None
 
     def predict(self, frames, camera_ids=None):
-        if not self.predictor: 
+        """
+        Detect vehicles and run LPR on each
+        
+        Args:
+            frames: List of frames (numpy arrays)
+            camera_ids: Optional camera IDs for tracking
+            
+        Returns:
+            List of PPVehicleResult
+        """
+        if self.predictor is None:
+            return [PPVehicleResult() for _ in (frames if isinstance(frames, list) else [frames])]
+            
+        if not isinstance(frames, list):
+            frames = [frames]
+            
+        if len(frames) == 0:
             return []
-
-        # 1. Preprocess Frames (Batch)
-        # Assuming frames is List[np.ndarray] (RGB) or Tensor
-        # PP-Vehicle (YOLO) expects 640x640 (check config, typically 640 for PPYOLOE-S)
-        
-        is_list = isinstance(frames, list)
-        batch_size = len(frames) if is_list else frames.shape[0]
-        
-        if batch_size == 0: return []
-
-        # Preprocess logic - Process frames individually for different resolutions
-        import cv2
-        TARGET_SIZE = (640, 640)
-        
-        # Resize each frame individually to same size
-        resized_frames = []
-        for f in frames:
-            resized = cv2.resize(f, TARGET_SIZE, interpolation=cv2.INTER_LINEAR)
-            resized_frames.append(resized)
-        
-        img_batch = np.stack(resized_frames, axis=0)
             
-        # Normalize/Permute (standard ImageNet)
-        img = img_batch.astype('float32') / 255.0
-        mean = np.array([0.485, 0.456, 0.406], dtype='float32').reshape(1, 1, 1, 3)
-        std = np.array([0.229, 0.224, 0.225], dtype='float32').reshape(1, 1, 1, 3)
-        img = (img - mean) / std
-        img = img.transpose((0, 3, 1, 2)) # NCHW
-        img = np.ascontiguousarray(img)
-        
-        # Metadata
-        im_shape = np.tile([640., 640.], (batch_size, 1)).astype('float32') # Check model input size! 
-        scale_factor = np.tile([1., 1.], (batch_size, 1)).astype('float32')
-        
-        # Set Inputs
-        input_names = self.predictor.get_input_names()
-        for name in input_names:
-            handle = self.predictor.get_input_handle(name)
-            if name == 'image': handle.copy_from_cpu(img)
-            elif name == 'im_shape': handle.copy_from_cpu(im_shape)
-            elif name == 'scale_factor': handle.copy_from_cpu(scale_factor)
-            
-        # Run
-        self.predictor.run()
-        
-        # Get Outputs
-        # PPYOLOE output: 'multiclass_nms3_0.tmp_0' (Boxes), 'multiclass_nms3_0.tmp_2' (Count)
-        output_names = self.predictor.get_output_names()
-        mot_res_raw = {}
-        for name in output_names:
-            mot_res_raw[name] = self.predictor.get_output_handle(name).copy_to_cpu()
-            
-        # Parse
-        bbox_counts = None
-        boxes_tensor = None
-        for k, v in mot_res_raw.items():
-             if v.ndim == 2 and v.shape[1] == 6: boxes_tensor = v
-             elif (v.ndim == 1 or (v.ndim==2 and v.shape[1]==1)): bbox_counts = v.flatten()
-        
         results = []
-        current_box_idx = 0
         
-        for i in range(batch_size):
-            res = PPVehicleResult()
+        for i, frame in enumerate(frames):
+            result = PPVehicleResult()
             cam_id = camera_ids[i] if camera_ids else f"cam_{i}"
             
-            # Extract raw boxes
-            num_boxes = 0
-            if bbox_counts is not None: num_boxes = int(bbox_counts[i])
-            elif batch_size == 1 and boxes_tensor is not None: num_boxes = len(boxes_tensor)
-            
-            frame_dets = np.zeros((0, 6))
-            if num_boxes > 0 and boxes_tensor is not None:
-                frame_dets = boxes_tensor[current_box_idx : current_box_idx + num_boxes]
-                current_box_idx += num_boxes
-            
-            # Filter Logic (Vehicle Classes check)
-            # COCO Classes: 2=Car, 5=Bus, 7=Truck
-            # PP-Vehicle Model Classes: 0=Car, 1=Truck, 2=Bus, 3=Motorcycle (Verification needed!)
-            # Standard PP-Vehicle: 
-            # 0: car, 1: truck, 2: bus, 3: motorcycle. 
-            # Note: This is DIFFERENT from COCO.
-            VALID_CLASSES = [0, 1, 2, 3] 
-            
-            filtered_dets = []
-            if len(frame_dets) > 0:
-                for det in frame_dets:
-                    cls_id = int(det[0])
-                    score = float(det[1])
-                    if score > 0.3 and cls_id in VALID_CLASSES: # Threshold
-                        filtered_dets.append(det)
-            
-            filtered_dets = np.array(filtered_dets)
-            
-            # Tracking
-            # Need Per-Camera Tracker
-            # ... (Simple Tracking Logic - reuse from PPHuman if possible or manual) ...
-            # For iteration 1, we skip tracking and do LPR on Detection to save implementing tracker logic now.
-            # OR we implement a dummy tracker that assigns ID based on IOU?
-            # Let's skip heavy tracking for now or we will block here forever. 
-            # Just Detect -> LPR.
-            
-            if len(filtered_dets) > 0:
-                 for det in filtered_dets:
-                     # det: [cls, score, x1, y1, x2, y2]
-                     cls_id = int(det[0])
-                     score = float(det[1])
-                     box = det[2:6]
-                     
-                     res.id.append(None) # No track ID yet
-                     res.cls.append(cls_id)
-                     res.conf.append(score)
-                     res.boxes.append(box.tolist())
-                     
-                     # 3. Runs LPR (On Crop)
-                     if self.lpr_model:
-                         x1, y1, x2, y2 = map(int, box)
-                         # Clamp
-                         h, w = (640, 640) # Original frame size?? No, frame size.
-                         # Need original frame size. `frames[i]` is (640,640,3) OR original?
-                         # Main.py resizes to 640x640 usually BEFORE passing? 
-                         # Main.py: _letterbox_resize to target_size (640).
-                         
-                         frame_h, frame_w = frames[i].shape[:2]
-                         x1 = max(0, min(x1, frame_w)); x2 = max(0, min(x2, frame_w))
-                         y1 = max(0, min(y1, frame_h)); y2 = max(0, min(y2, frame_h))
-                         
-                         if (x2 - x1) > 20 and (y2 - y1) > 20:
-                             crop = frames[i][y1:y2, x1:x2]
-                             
-                             # LPR Predict
-                             lpr_res = self.lpr_model.predict(crop)
-                             if lpr_res.label:
-                                 # Store result
-                                 # print(f"🚗 LPR Found: {lpr_res.label} ({lpr_res.conf:.2f})", flush=True)
-                                 # Map track_id (None) -> Plate
-                                 # We need a key. Index?
-                                 res.plates[len(res.id)-1] = lpr_res.label
-            
-            results.append(res)
+            try:
+                # Preprocess
+                img, scale_factor, im_shape = self._preprocess(frame)
+                
+                # Set inputs
+                input_names = self.predictor.get_input_names()
+                for name in input_names:
+                    handle = self.predictor.get_input_handle(name)
+                    if 'image' in name.lower() or 'im' == name:
+                        handle.copy_from_cpu(img)
+                    elif 'scale' in name.lower():
+                        handle.copy_from_cpu(scale_factor)
+                    elif 'shape' in name.lower():
+                        handle.copy_from_cpu(im_shape)
+                        
+                # Run inference
+                self.predictor.run()
+                
+                # Get outputs
+                output_names = self.predictor.get_output_names()
+                outputs = {}
+                for name in output_names:
+                    outputs[name] = self.predictor.get_output_handle(name).copy_to_cpu()
+                    
+                # Parse detections
+                detections = self._parse_outputs(outputs, frame.shape[:2])
+                
+                # Filter for vehicles only
+                vehicle_idx = 0
+                for det in detections:
+                    cls_id, score, x1, y1, x2, y2 = det
+                    cls_id = int(cls_id)
+                    
+                    if cls_id in VEHICLE_CLASSES and score > self.conf_threshold:
+                        track_id = self._assign_track_id(cam_id, [x1, y1, x2, y2])
+                        
+                        result.boxes.append([x1, y1, x2, y2])
+                        result.id.append(track_id)
+                        result.cls.append(cls_id)
+                        result.conf.append(float(score))
+                        result.vehicle_types[vehicle_idx] = VEHICLE_CLASSES[cls_id]
+                        
+                        # Run LPR on vehicle crop
+                        if self.lpr_model:
+                            x1i, y1i, x2i, y2i = map(int, [x1, y1, x2, y2])
+                            h, w = frame.shape[:2]
+                            x1i = max(0, min(x1i, w))
+                            x2i = max(0, min(x2i, w))
+                            y1i = max(0, min(y1i, h))
+                            y2i = max(0, min(y2i, h))
+                            
+                            if (x2i - x1i) > 50 and (y2i - y1i) > 50:
+                                crop = frame[y1i:y2i, x1i:x2i]
+                                lpr_result = self.lpr_model.predict(crop)
+                                if lpr_result.label:
+                                    result.plates[vehicle_idx] = lpr_result.label
+                                    
+                        vehicle_idx += 1
+                        
+            except Exception as e:
+                print(f"❌ PP-Vehicle inference error: {e}", flush=True)
+                
+            results.append(result)
             
         return results
+        
+    def _preprocess(self, frame):
+        """Preprocess frame for RT-DETR"""
+        h, w = frame.shape[:2]
+        target_h, target_w = self.input_size
+        
+        resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+        
+        img = resized.astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        img = (img - mean) / std
+        
+        img = img.transpose((2, 0, 1))
+        img = np.expand_dims(img, axis=0)
+        img = np.ascontiguousarray(img)
+        
+        scale_factor = np.array([[float(target_h) / h, float(target_w) / w]], dtype=np.float32)
+        im_shape = np.array([[float(target_h), float(target_w)]], dtype=np.float32)
+        
+        return img, scale_factor, im_shape
+        
+    def _parse_outputs(self, outputs, original_shape):
+        """Parse RT-DETR outputs"""
+        detections = []
+        
+        for name, tensor in outputs.items():
+            if tensor.ndim == 2 and tensor.shape[1] == 6:
+                for row in tensor:
+                    if row[1] > 0.01:
+                        detections.append(row.tolist())
+            elif tensor.ndim == 3:
+                for row in tensor[0]:
+                    if row[1] > 0.01:
+                        detections.append(row.tolist())
+                        
+        h, w = original_shape
+        th, tw = self.input_size
+        scale_x = w / tw
+        scale_y = h / th
+        
+        scaled = []
+        for det in detections:
+            cls_id, score, x1, y1, x2, y2 = det
+            scaled.append([
+                cls_id, score,
+                x1 * scale_x, y1 * scale_y,
+                x2 * scale_x, y2 * scale_y
+            ])
+            
+        return scaled
+        
+    def _assign_track_id(self, camera_id, box, iou_threshold=0.5):
+        """Simple IOU-based tracking"""
+        if camera_id not in self._track_history:
+            self._track_history[camera_id] = {}
+            
+        best_match = None
+        best_iou = 0.0
+        
+        for track_id, prev_box in self._track_history[camera_id].items():
+            iou = self._compute_iou(box, prev_box)
+            if iou > best_iou and iou > iou_threshold:
+                best_iou = iou
+                best_match = track_id
+                
+        if best_match is not None:
+            self._track_history[camera_id][best_match] = box
+            return best_match
+        else:
+            self._next_track_id += 1
+            self._track_history[camera_id][self._next_track_id] = box
+            return self._next_track_id
+            
+    def _compute_iou(self, box1, box2):
+        """Compute IOU between two boxes"""
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = area1 + area2 - inter
+        
+        return inter / union if union > 0 else 0

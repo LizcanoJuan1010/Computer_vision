@@ -16,17 +16,42 @@ class Config:
     def DB_CONN_STR(self):
         return f"dbname={self.DB_NAME} user={self.DB_USER} password={self.DB_PASSWORD} host={self.DB_HOST} port={self.DB_PORT}"
 
-    # Models
-    # PP-Human (PaddlePaddle)
-    PPHUMAN_CONFIG_PATH = "inference/config/pphuman.yaml" # Placeholder for config
-    PPHUMAN_DET_MODEL_DIR = "/app/weights/mot_ppyoloe_l_36e_pipeline"
-    PPHUMAN_ATTR_MODEL_DIR = "/app/weights/PPLCNet_x1_0_person_attribute_945_infer"
-    PPHUMAN_ACTION_MODEL_DIR = "/app/weights/STGCN"
-    PPHUMAN_SMOKING_MODEL_DIR = "/app/weights/ppyoloe_crn_s_80e_smoking_visdrone"
-    PPHUMAN_CALLING_MODEL_DIR = "/app/weights/PPHGNet_tiny_calling_halfbody"
+    # ==========================================================================
+    # MODEL PATHS - Updated for NGC Container + RT-DETR + PP-OCRv4
+    # ==========================================================================
     
-    FACE_DET_MODEL_PATH = os.getenv("FACE_DET_MODEL_PATH", "/app/weights/face_detection_yunet_2023mar.onnx")
-    FACE_REC_MODEL_PATH = os.getenv("FACE_REC_MODEL_PATH", "/app/weights/ghostfacenetv2.onnx")
+    # PP-Human (RT-DETR Detection)
+    PPHUMAN_CONFIG_PATH = "inference/config/pphuman.yaml"
+    # RT-DETR exported model (downloaded & exported in Dockerfile)
+    # Note: export_model puts files in a subdirectory named after the config
+    PPHUMAN_DET_MODEL_DIR = "/app/weights/human_det/rtdetr_r18.onnx"
+    # Fallback if export failed
+    PPHUMAN_DET_MODEL_DIR_ALT = "/app/weights/human_det"
+    
+    # PP-Human Attributes (PPLCNet)
+    PPHUMAN_ATTR_MODEL_DIR = "/app/weights/attributes/PPLCNet_x1_0_person_attribute_945_infer"
+    
+    # RTMPose for Skeleton/Pose (downloaded in Dockerfile)
+    PPHUMAN_POSE_MODEL_DIR = "/app/weights/pose"
+    
+    # Face Detection (YuNet - downloaded in Dockerfile)
+    FACE_DET_MODEL_PATH = os.getenv(
+        "FACE_DET_MODEL_PATH", 
+        "/app/weights/face/yunet.onnx"
+    )
+    # Fallback to local weights if container path not found
+    FACE_DET_MODEL_PATH_ALT = "/app/weights/face/face_detection_yunet_2023mar.onnx"
+    
+    # Face Recognition (GhostFaceNetV2)
+    FACE_REC_MODEL_PATH = os.getenv(
+        "FACE_REC_MODEL_PATH", 
+        "/app/weights/face/ghostfacenetv2.onnx"
+    )
+    
+    # OCR Models for LPR (PP-OCRv4 Server - downloaded in Dockerfile)
+    OCR_DET_MODEL_DIR = "/app/weights/ocr/det"
+    OCR_REC_MODEL_DIR = "/app/weights/ocr/rec"
+    OCR_CLS_MODEL_DIR = "/app/weights/ocr/cls"
     
     # Face Detection Config (YuNet)
     FACE_DET_SCORE_THRESHOLD = 0.6
@@ -34,14 +59,14 @@ class Config:
     FACE_DET_TOP_K = 5000
     
     # Logic
-    SIMILARITY_THRESHOLD = 0.85 
+    SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.85"))
 
     # Scalability (Sharding)
     INSTANCE_ID = int(os.getenv("INSTANCE_ID", "0"))
     TOTAL_INSTANCES = int(os.getenv("TOTAL_INSTANCES", "1"))
 
     # Optimization
-    USE_TENSORRT = os.getenv("USE_TENSORRT", "true").lower() == "true"
+    USE_TENSORRT = os.getenv("USE_TENSORRT", "false").lower() == "true"
     TENSORRT_PRECISION = os.getenv("TENSORRT_PRECISION", "fp16") # fp16, fp32, int8 
 
     # Defaults
@@ -51,13 +76,13 @@ class Config:
     DEFAULT_LINE_CROSSING_CLASSES = [0, 2, 5, 7] # Person, Car, Bus, Truck
 
     # LPR
-    LPR_MODEL_NAME = "paddleocr_stub" # Placeholder for future PaddleOCR integration
+    LPR_MODEL_NAME = "paddleocr_v4"
     DEFAULT_LPR_CONFIDENCE = 0.45
 
     # Face Cache (LFU Hybrid)
-    FACE_CACHE_L1_CAPACITY = int(os.getenv("FACE_CACHE_L1_CAPACITY", "1000"))  # Max faces in L1 memory
+    FACE_CACHE_L1_CAPACITY = int(os.getenv("FACE_CACHE_L1_CAPACITY", "1000"))
     FACE_CACHE_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6380/0")
     FACE_CACHE_ENABLED = os.getenv("FACE_CACHE_ENABLED", "true").lower() == "true"
-    FACE_CACHE_INCLUDE_GLOBAL_BLACKLIST = True  # Always search global blacklist
+    FACE_CACHE_INCLUDE_GLOBAL_BLACKLIST = True
 
 config = Config()

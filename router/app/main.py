@@ -26,6 +26,11 @@ nc = None
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting AI Router...")
+    
+    # 0. Verify and Fix Schema (Self-Healing)
+    from app.core.schema_init import verify_and_fix_schema
+    await verify_and_fix_schema()
+    
     await router_cache.connect()
     
     # Connect to NATS

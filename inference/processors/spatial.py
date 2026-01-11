@@ -138,68 +138,34 @@ class SpatialAnalytics:
         """
         Draws zones, lines, and annotations on the frame.
         """
-        # 1. Initialize annotated_frame ALWAYS
+        # DISABLE ALL DRAWING TO TEST STABILITY (SIGILL CHECK)
         annotated_frame = frame.copy()
-
-        # DEBUG SPATIAL
-        if len(detections) > 0:
-             # Just a pass to avoid indentation issues with print
-             print(f"DEBUG: Spatial received {len(detections)} detections", flush=True)
-             pass
         
-        # 2. Draw Intrusion Zone (Polygon)
-        if self.polygon_annotator is not None:
-            annotated_frame = self.polygon_annotator.annotate(scene=annotated_frame)
+        # try:
+        #      h, w = annotated_frame.shape[:2]
+        #      print(f"DEBUG: Frame Valid? Shape: {annotated_frame.shape} Dtype: {annotated_frame.dtype} | Detection Count: {len(detections.xyxy)}", flush=True)
+             
+        #      for i, xyxy in enumerate(detections.xyxy):
+        #          x1, y1, x2, y2 = map(int, xyxy)
+                 
+        #          # LOG RAW COORDS
+        #          # print(f"DEBUG: Box {i} RAW: {x1, y1, x2, y2}", flush=True)
+                 
+        #          # CLAMP
+        #          x1 = max(0, min(w, x1))
+        #          y1 = max(0, min(h, y1))
+        #          x2 = max(0, min(w, x2))
+        #          y2 = max(0, min(h, y2))
+                 
+        #          # print(f"DEBUG: Box {i} CLAMPED: {x1, y1, x2, y2}", flush=True)
 
-        # 3. Draw Line Zones
-        if self.line_zones:
-            for zone in self.line_zones:
-                annotated_frame = self.line_annotator.annotate(frame=annotated_frame, line_counter=zone)
+        #          # Draw
+        #          # cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        #          # cv2.putText(annotated_frame, "MANUAL", (x1, y1-20), 1, 1, (0, 255, 0), 2)
+        # except Exception as e:
+        #      print(f"❌ ERROR drawing manual box: {e}", flush=True)
 
-        # 4. Draw Detections
-        labels = []
-        for i in range(len(detections)):
-             tid = detections.tracker_id[i] if detections.tracker_id is not None else "N/A"
-             class_id = detections.class_id[i]
-             labels.append(f"#{tid} C{class_id}")
-
-        # Split detections for coloring (intrusion vs normal)
-        intrusion_ids = []
-        if self.polygon_zone is not None and len(detections) > 0 and detections.tracker_id is not None:
-            mask_intrusion_classes = np.isin(detections.class_id, self.intrusion_classes)
-            detections_for_intrusion_check = detections[mask_intrusion_classes]
-            
-            if len(detections_for_intrusion_check) > 0:
-                is_inside = self.polygon_zone.trigger(detections=detections_for_intrusion_check)
-                if np.any(is_inside):
-                    intrusion_ids = detections_for_intrusion_check.tracker_id[is_inside].tolist()
-
-        if intrusion_ids and detections.tracker_id is not None:
-            intrusion_mask = np.isin(detections.tracker_id, intrusion_ids)
-            normal_mask = ~intrusion_mask
-            
-            detections_intrusion = detections[intrusion_mask]
-            detections_normal = detections[normal_mask]
-            
-            labels_intrusion = [lbl for i, lbl in enumerate(labels) if intrusion_mask[i]]
-            labels_normal = [lbl for i, lbl in enumerate(labels) if normal_mask[i]]
-            
-            if len(detections_normal) > 0:
-                annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=detections_normal)
-                annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=detections_normal, labels=labels_normal)
-            
-            if len(detections_intrusion) > 0:
-                if not hasattr(self, "red_annotator"): 
-                    self.red_annotator = sv.BoxAnnotator(color=sv.Color.RED, thickness=4)
-                    self.red_label_annotator = sv.LabelAnnotator(color=sv.Color.RED, text_thickness=1, text_scale=0.5)
-                annotated_frame = self.red_annotator.annotate(scene=annotated_frame, detections=detections_intrusion)
-                annotated_frame = self.red_label_annotator.annotate(scene=annotated_frame, detections=detections_intrusion, labels=labels_intrusion)
-        else:
-            # Normal annotation for all
-            if len(detections) > 0:
-                annotated_frame = self.box_annotator.annotate(scene=annotated_frame, detections=detections)
-                annotated_frame = self.label_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
-
+        # print(f"DEBUG: Skipping Draw. Frame Shape: {annotated_frame.shape}", flush=True)
         return annotated_frame
 
     def update(self, frame: np.ndarray, detections_input: Any) -> SpatialResult:

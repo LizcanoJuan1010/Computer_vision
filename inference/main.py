@@ -1,5 +1,6 @@
 import asyncio
 import os
+os.environ["FLAGS_enable_pir_api"] = "0" # CRITICAL: Disable PIR to fixture legacy model crashes
 import json
 import time
 import numpy as np
@@ -173,7 +174,7 @@ async def run():
         print("❌ DB Connection Failed")
         return
 
-    # 2. Initialize Models
+
     try:
         print("Loading PP-Human Model...")
         pp_human_model = PPHumanModel()
@@ -183,17 +184,18 @@ async def run():
         face_model.load()
         
         # 3. LPR Model (Used by Vehicle Model)
-        print("Loading LPR Model...")
-        lpr_model = LPRModel()
-        lpr_model.load()
+        # print("Loading LPR Model...")
+        # lpr_model = LPRModel()
+        # lpr_model.load()
+        lpr_model = None
         
         # 3.5 Vehicle Model (Wraps LPR)
-        print("Loading PP-Vehicle Model...")
-        # Define path to downloaded weights
-        pp_vehicle_weights = "/app/inference/weights/ppvehicle"
-        vehicle_model = PPVehicleModel(model_dir=pp_vehicle_weights, lpr_model=lpr_model)
-        vehicle_model.load()
-        # vehicle_model = None
+        # print("Loading PP-Vehicle Model...")
+        # pp_vehicle_weights = config.PPHUMAN_DET_MODEL_DIR  # RT-DETR shared model
+        # vehicle_model = PPVehicleModel(model_dir=pp_vehicle_weights, lpr_model=lpr_model)
+        # vehicle_model.load()
+        vehicle_model = None
+
     except Exception as e:
         print(f"❌ Model Load Failed: {e}")
         return
@@ -206,7 +208,7 @@ async def run():
         db=db, 
         yolo_model=pp_human_model, 
         face_model=face_model, 
-        vehicle_model=vehicle_model, # Passed here
+        vehicle_model=vehicle_model, # Passed here (None)
         face_cache=face_cache,
         loop=loop
     )
@@ -246,9 +248,9 @@ async def run():
     
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 5000)
+    site = web.TCPSite(runner, '0.0.0.0', 5005)
     await site.start()
-    print("✅ Debug Stream Server running on port 5000")
+    print("✅ Debug Stream Server running on port 5005")
 
     # 6. Setup RTSP Readers
     rtsp_reader = None
@@ -298,7 +300,10 @@ async def run():
     
     if active_cameras:
         print(f"🚀 Starting RTSP readers for {len(active_cameras)} cameras...")
-        rtsp_reader = ThreadedRTSPReader(active_cameras, target_size=(640, 640))
+        target_h = int(os.getenv('RESIZE_HEIGHT', 360))
+        target_w = int(os.getenv('RESIZE_WIDTH', 640))
+        print(f"📏 Target Resolution: {target_w}x{target_h}")
+        rtsp_reader = ThreadedRTSPReader(active_cameras, target_size=(target_w, target_h))
         
         # Pre-load camera configurations
         print("🔄 Pre-loading camera configurations...")
@@ -338,15 +343,26 @@ async def run():
                     batch_configs = [camera_configs.get(cid, {}) for cid in batch_ids]
                     
                     frame_cnt += 1
-                    if frame_cnt % 30 == 0:
-                        print(f"📦 Processing batch: {len(batch_ids)} cameras")
                     
                     with PROCESSING_LATENCY.time():
-                        # Process the batch (pass ORIGINAL frames to model)
-                        processed = processor.process_batch(original_batch, batch_ids, batch_configs, gpu_frames=None)
+                        t0 = time.time()
                         
+                        # Process batch in Executor to avoid blocking AsyncIO Loop (Heartbeats, Web Server)
+                        # We use a ThreadPoolExecutor (logic within security.py is CPU bound mostly but calls GPU)
+                        # Since Python GIL exists, this helps mostly if there are IO bound tasks inside or if using released GIL libs (like OpenCV/Paddle/Numpy often do).
+                        processed = await loop.run_in_executor(
+                            None, 
+                            lambda: processor.process_batch(original_batch, batch_ids, batch_configs, gpu_frames=None)
+                        )
+                        
+                        t1 = time.time()
+                        
+                        latency_ms = (t1 - t0) * 1000
+                        if frame_cnt % 10 == 0:
+                            print(f"📦 Batch: {len(batch_ids)} cams | Latency: {latency_ms:.1f}ms | FPS: {1000/latency_ms if latency_ms > 0 else 0:.1f}", flush=True)
+
                         # Update debug streams
-                        if len(processed) == len(batch_ids):
+                        if processed and len(processed) == len(batch_ids):
                             for cid, frame in zip(batch_ids, processed):
                                 latest_annotated_frames[cid] = frame
                     

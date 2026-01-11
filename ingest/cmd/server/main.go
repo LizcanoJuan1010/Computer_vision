@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,7 +14,7 @@ import (
 	"gocv.io/x/gocv"
 
 	"github.com/nats-io/nats.go"
-	
+
 	"vigias-ia/ingest/internal/config"
 	"vigias-ia/ingest/internal/pipeline"
 )
@@ -51,12 +52,27 @@ func main() {
 	defer nc.Close()
 
 	// Create Camera Manager for hot-reload support
-	cameraManager := pipeline.NewCameraManager(nc, cfg)
+	// Create default FPS Boost Handler
+	fpsBoostHandler := pipeline.NewFPSBoostHandler(context.Background(), nc)
+	if err := fpsBoostHandler.Start(); err != nil {
+		log.Printf("Failed to start FPS Boost Handler: %v", err)
+	}
+
+	// Create CameraManager with FPS Boost support
+	cameraManager := pipeline.NewCameraManager(nc, cfg, fpsBoostHandler)
 
 	// Subscribe to NATS commands for dynamic camera control
 	if err := cameraManager.SubscribeToCommands(); err != nil {
 		log.Fatalf("Failed to subscribe to camera commands: %v", err)
 	}
+
+	// Create and start Global FPS Boost Handler
+	ctx := context.Background()
+	pipeline.GlobalFPSBoostHandler = pipeline.NewFPSBoostHandler(ctx, nc)
+	if err := pipeline.GlobalFPSBoostHandler.Start(); err != nil {
+		log.Fatalf("Failed to start FPS boost handler: %v", err)
+	}
+	defer pipeline.GlobalFPSBoostHandler.Stop()
 
 	log.Printf("Starting Ingestion Service for %d cameras...", len(cfg.Cameras))
 

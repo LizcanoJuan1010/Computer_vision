@@ -159,7 +159,6 @@ async def update_camera(
 
 
 @router.delete("/{camera_id}", status_code=204)
-@router.delete("/{camera_id}", status_code=204)
 async def delete_camera(
     request: Request,
     camera: Camera = Depends(get_camera_in_zone),

@@ -12,11 +12,12 @@ import (
 
 // CameraManager manages dynamic addition/removal of cameras
 type CameraManager struct {
-	cameras     map[string]*CameraInstance
-	mu          sync.RWMutex
-	nc          *nats.Conn
-	cfg         *config.Config
-	cancelFuncs map[string]context.CancelFunc
+	cameras         map[string]*CameraInstance
+	mu              sync.RWMutex
+	nc              *nats.Conn
+	cfg             *config.Config
+	cancelFuncs     map[string]context.CancelFunc
+	fpsBoostHandler *FPSBoostHandler
 }
 
 // CameraInstance represents a running camera with its workers
@@ -27,12 +28,13 @@ type CameraInstance struct {
 }
 
 // NewCameraManager creates a new camera manager
-func NewCameraManager(nc *nats.Conn, cfg *config.Config) *CameraManager {
+func NewCameraManager(nc *nats.Conn, cfg *config.Config, boostHandler *FPSBoostHandler) *CameraManager {
 	return &CameraManager{
-		cameras:     make(map[string]*CameraInstance),
-		nc:          nc,
-		cfg:         cfg,
-		cancelFuncs: make(map[string]context.CancelFunc),
+		cameras:         make(map[string]*CameraInstance),
+		nc:              nc,
+		cfg:             cfg,
+		cancelFuncs:     make(map[string]context.CancelFunc),
+		fpsBoostHandler: boostHandler,
 	}
 }
 
@@ -60,7 +62,8 @@ func (cm *CameraManager) StartCamera(cam config.CameraConfig) error {
 			close(captureChan)
 			log.Printf("[CameraManager] Capture worker stopped for %s", cam.Name)
 		}()
-		CaptureWorker(cam, cm.cfg, captureChan)
+		// Pass fpsBoostHandler to CaptureWorker
+		CaptureWorker(cam, cm.cfg, captureChan, cm.fpsBoostHandler)
 	}()
 
 	go func() {

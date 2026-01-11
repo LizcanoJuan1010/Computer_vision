@@ -22,7 +22,7 @@ import os
 from datetime import datetime
 
 from app.core.database import get_db
-from app.models import Face, Organization, Event, Camera, OrgZone
+from app.models import Face, Organization, Event, Camera, OrgZone, BlacklistSharingLog
 from app.api.routes.schemas_extended import (
     FaceCreateMultitenancy,
     FaceUpdateMultitenancy,
@@ -449,11 +449,12 @@ async def share_face_to_global_blacklist(
     face.category = 'BLACKLIST' # Force category to BLACKLIST
     
     # 3. Log Action (Audit)
-    # We use raw execution for the log table as it might not have a model yet
-    await db.execute(text("""
-        INSERT INTO blacklist_sharing_log (face_id, shared_by_org_id, action, timestamp)
-        VALUES (:face_id, :org_id, 'SHARED', NOW())
-    """), {"face_id": face.id, "org_id": org.id})
+    log_entry = BlacklistSharingLog(
+        face_id=face.id,
+        shared_by_org_id=org.id,
+        action='SHARED'
+    )
+    db.add(log_entry)
 
     await db.commit()
     await db.refresh(face)
@@ -501,10 +502,12 @@ async def unshare_face_from_global_blacklist(
     face.is_global_blacklist = False
     
     # Log
-    await db.execute(text("""
-        INSERT INTO blacklist_sharing_log (face_id, shared_by_org_id, action, timestamp)
-        VALUES (:face_id, :org_id, 'UNSHARED', NOW())
-    """), {"face_id": face.id, "org_id": org.id})
+    log_entry = BlacklistSharingLog(
+        face_id=face.id,
+        shared_by_org_id=org.id,
+        action='UNSHARED'
+    )
+    db.add(log_entry)
 
     await db.commit()
     await db.refresh(face)

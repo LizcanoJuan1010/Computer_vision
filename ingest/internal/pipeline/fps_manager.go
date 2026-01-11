@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -19,15 +20,29 @@ const (
 	PriorityCritical CameraPriority = "CRITICAL"
 )
 
-// FPSManager handles dynamic FPS adjustment based on priority and resources
+// FPSState represents the current FPS operational state
+type FPSState string
+
+const (
+	FPSStateNormal    FPSState = "normal"    // Normal operation
+	FPSStateBoosted   FPSState = "boosted"   // Boosted during important events
+	FPSStateEmergency FPSState = "emergency" // Emergency throttle (GPU >95%)
+)
+
+// FPSManager handles dynamic FPS adjustment based on events and GPU load
 type FPSManager struct {
 	cameraID   string
 	priority   CameraPriority
 	targetFPS  float64
 	currentFPS float64
-	degraded   bool
+	state      FPSState
 	dbConnStr  string
 	ctx        context.Context
+	mu         sync.RWMutex
+
+	// Boost management
+	boostEndTime time.Time
+	boostTimer   *time.Timer
 }
 
 // NewFPSManager creates a new FPS manager
@@ -37,7 +52,7 @@ func NewFPSManager(ctx context.Context, cameraID string, priority CameraPriority
 		priority:   priority,
 		targetFPS:  targetFPS,
 		currentFPS: targetFPS,
-		degraded:   false,
+		state:      FPSStateNormal,
 		dbConnStr:  dbConnStr,
 		ctx:        ctx,
 	}
@@ -64,106 +79,166 @@ func (fm *FPSManager) LoadPriorityFromDB() error {
 		return fmt.Errorf("failed to load priority: %w", err)
 	}
 
+	fm.mu.Lock()
 	fm.priority = CameraPriority(priority)
 	fm.targetFPS = targetFPS
 	fm.currentFPS = targetFPS
+	fm.mu.Unlock()
 
 	log.Printf("[FPSManager] Camera %s: Priority=%s, TargetFPS=%.2f", fm.cameraID, priority, targetFPS)
 	return nil
 }
 
-// AdjustFPS adjusts FPS based on system load and priority
-func (fm *FPSManager) AdjustFPS(systemLoad float64, totalCameras int) float64 {
-	// High system load threshold: 80%
-	highLoadThreshold := 80.0
+// BoostFPS increases FPS based on event type and camera priority
+func (fm *FPSManager) BoostFPS(eventType string, duration time.Duration) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
 
-	// If system is not under pressure, return target FPS
-	if systemLoad < highLoadThreshold {
-		if fm.degraded {
-			fm.RestoreFPS()
-		}
-		return fm.targetFPS
+	// If already in emergency mode, don't boost
+	if fm.state == FPSStateEmergency {
+		log.Printf("[FPSManager] ⚠️  Camera %s: Cannot boost during emergency throttle", fm.cameraID)
+		return
 	}
 
-	// System is under pressure - adjust based on priority
-	var adjustedFPS float64
+	// Calculate boost factor based on priority
+	var boostFactor float64
+	var boostDuration time.Duration
 
 	switch fm.priority {
 	case PriorityCritical:
-		// Critical cameras: maintain 90% of target FPS
-		adjustedFPS = fm.targetFPS * 0.9
-
+		boostFactor = 2.0        // 2x FPS
+		boostDuration = 30 * time.Second
 	case PriorityHigh:
-		// High priority: maintain 70% of target FPS
-		adjustedFPS = fm.targetFPS * 0.7
-
+		boostFactor = 1.5        // 1.5x FPS
+		boostDuration = 20 * time.Second
 	case PriorityNormal:
-		// Normal priority: maintain 50% of target FPS
-		adjustedFPS = fm.targetFPS * 0.5
-
+		boostFactor = 1.2        // 1.2x FPS
+		boostDuration = 15 * time.Second
 	case PriorityLow:
-		// Low priority: drop to 30% of target FPS
-		adjustedFPS = fm.targetFPS * 0.3
-
+		boostFactor = 1.0        // No boost
+		boostDuration = 0
 	default:
-		adjustedFPS = fm.targetFPS * 0.5
+		boostFactor = 1.2
+		boostDuration = 15 * time.Second
 	}
 
-	// Ensure minimum FPS of 5
-	if adjustedFPS < 5.0 {
-		adjustedFPS = 5.0
+	// Use custom duration if provided
+	if duration > 0 {
+		boostDuration = duration
 	}
 
-	// Update if changed
-	if adjustedFPS != fm.currentFPS {
-		fm.DegradeFPS(adjustedFPS)
+	// No boost for LOW priority
+	if boostFactor == 1.0 {
+		log.Printf("[FPSManager] Camera %s: LOW priority - no boost applied", fm.cameraID)
+		return
 	}
 
-	return adjustedFPS
-}
-
-// DegradeFPS marks FPS as degraded and updates database
-func (fm *FPSManager) DegradeFPS(newFPS float64) error {
+	boostedFPS := fm.targetFPS * boostFactor
 	oldFPS := fm.currentFPS
-	fm.currentFPS = newFPS
-	fm.degraded = true
+	fm.currentFPS = boostedFPS
+	fm.state = FPSStateBoosted
+	fm.boostEndTime = time.Now().Add(boostDuration)
 
-	log.Printf("[FPSManager] ⚠️  Camera %s: FPS degraded %.2f → %.2f (Priority: %s)",
-		fm.cameraID, oldFPS, newFPS, fm.priority)
+	log.Printf("[FPSManager] 🚀 Camera %s: FPS BOOSTED %.1f → %.1f (Event: %s, Priority: %s, Duration: %v)",
+		fm.cameraID, oldFPS, boostedFPS, eventType, fm.priority, boostDuration)
 
 	// Update database
-	return fm.updateDatabaseFPS()
+	go fm.updateDatabaseState()
+
+	// Cancel previous timer if exists
+	if fm.boostTimer != nil {
+		fm.boostTimer.Stop()
+	}
+
+	// Set timer to restore normal FPS
+	fm.boostTimer = time.AfterFunc(boostDuration, func() {
+		fm.RestoreNormalFPS()
+	})
 }
 
-// RestoreFPS restores FPS to target and updates database
-func (fm *FPSManager) RestoreFPS() error {
+// RestoreNormalFPS restores FPS to normal target
+func (fm *FPSManager) RestoreNormalFPS() {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
+	// Don't restore if in emergency mode
+	if fm.state == FPSStateEmergency {
+		return
+	}
+
 	oldFPS := fm.currentFPS
 	fm.currentFPS = fm.targetFPS
-	fm.degraded = false
+	fm.state = FPSStateNormal
 
-	log.Printf("[FPSManager] ✅ Camera %s: FPS restored %.2f → %.2f",
+	log.Printf("[FPSManager] ✅ Camera %s: FPS restored to normal %.1f → %.1f",
 		fm.cameraID, oldFPS, fm.currentFPS)
 
 	// Update database
-	return fm.updateDatabaseFPS()
+	go fm.updateDatabaseState()
 }
 
-// updateDatabaseFPS updates current_fps and fps_degraded in database
-func (fm *FPSManager) updateDatabaseFPS() error {
+// CheckGPUThrottle checks GPU utilization and applies emergency throttle if needed
+func (fm *FPSManager) CheckGPUThrottle(gpuUtil float64) {
+	fm.mu.Lock()
+	defer fm.mu.Unlock()
+
+	const emergencyThreshold = 95.0
+	const restoreThreshold = 85.0
+	const emergencyFPS = 10.0
+
+	if gpuUtil >= emergencyThreshold && fm.state != FPSStateEmergency {
+		// Enter emergency mode
+		oldFPS := fm.currentFPS
+		fm.currentFPS = emergencyFPS
+		fm.state = FPSStateEmergency
+
+		// Cancel boost timer if active
+		if fm.boostTimer != nil {
+			fm.boostTimer.Stop()
+			fm.boostTimer = nil
+		}
+
+		log.Printf("[FPSManager] 🚨 Camera %s: EMERGENCY THROTTLE %.1f → %.1f FPS (GPU: %.1f%%)",
+			fm.cameraID, oldFPS, emergencyFPS, gpuUtil)
+
+		go fm.updateDatabaseState()
+
+	} else if gpuUtil < restoreThreshold && fm.state == FPSStateEmergency {
+		// Exit emergency mode
+		oldFPS := fm.currentFPS
+		fm.currentFPS = fm.targetFPS
+		fm.state = FPSStateNormal
+
+		log.Printf("[FPSManager] ✅ Camera %s: Emergency throttle released %.1f → %.1f FPS (GPU: %.1f%%)",
+			fm.cameraID, oldFPS, fm.currentFPS, gpuUtil)
+
+		go fm.updateDatabaseState()
+	}
+}
+
+// updateDatabaseState updates FPS state in database
+func (fm *FPSManager) updateDatabaseState() error {
 	conn, err := pgx.Connect(fm.ctx, fm.dbConnStr)
 	if err != nil {
 		return fmt.Errorf("failed to connect to DB: %w", err)
 	}
 	defer conn.Close(context.Background())
 
+	fm.mu.RLock()
+	currentFPS := fm.currentFPS
+	state := fm.state
+	fm.mu.RUnlock()
+
 	_, err = conn.Exec(fm.ctx, `
 		UPDATE cameras
-		SET current_fps = $1, fps_degraded = $2
+		SET current_fps = $1,
+		    fps_degraded = $2,
+		    updated_at = NOW()
 		WHERE id = $3
-	`, fm.currentFPS, fm.degraded, fm.cameraID)
+	`, currentFPS, state == FPSStateEmergency, fm.cameraID)
 
 	if err != nil {
-		return fmt.Errorf("failed to update FPS: %w", err)
+		return fmt.Errorf("failed to update FPS state: %w", err)
 	}
 
 	return nil
@@ -171,26 +246,41 @@ func (fm *FPSManager) updateDatabaseFPS() error {
 
 // GetCurrentFPS returns the current adjusted FPS
 func (fm *FPSManager) GetCurrentFPS() float64 {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
 	return fm.currentFPS
 }
 
 // GetTargetFPS returns the target FPS
 func (fm *FPSManager) GetTargetFPS() float64 {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
 	return fm.targetFPS
 }
 
-// IsDegraded returns whether FPS is currently degraded
-func (fm *FPSManager) IsDegraded() bool {
-	return fm.degraded
+// GetState returns the current FPS state
+func (fm *FPSManager) GetState() FPSState {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	return fm.state
+}
+
+// GetPriority returns the camera priority
+func (fm *FPSManager) GetPriority() CameraPriority {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
+	return fm.priority
 }
 
 // GetFrameInterval returns the time duration between frames based on current FPS
 func (fm *FPSManager) GetFrameInterval() time.Duration {
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
 	return time.Second / time.Duration(fm.currentFPS)
 }
 
-// MonitorAndAdjust continuously monitors system and adjusts FPS
-func (fm *FPSManager) MonitorAndAdjust(interval time.Duration) {
+// MonitorGPU continuously monitors GPU and applies emergency throttle if needed
+func (fm *FPSManager) MonitorGPU(interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -201,17 +291,11 @@ func (fm *FPSManager) MonitorAndAdjust(interval time.Duration) {
 		case <-fm.ctx.Done():
 			return
 		case <-ticker.C:
-			// Get current CPU usage as system load indicator
-			cpuLoad := resourceMonitor.GetCPUPercent()
+			// Get GPU utilization
+			gpuUtil := resourceMonitor.GetGPUPercent()
 
-			// Adjust FPS based on load
-			// Note: totalCameras would need to be passed or tracked globally
-			adjustedFPS := fm.AdjustFPS(cpuLoad, 1)
-
-			if adjustedFPS != fm.currentFPS {
-				log.Printf("[FPSManager] Adjusted FPS for camera %s: %.2f (Load: %.1f%%)",
-					fm.cameraID, adjustedFPS, cpuLoad)
-			}
+			// Check and apply throttle if needed
+			fm.CheckGPUThrottle(gpuUtil)
 		}
 	}
 }

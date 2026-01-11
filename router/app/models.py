@@ -229,12 +229,27 @@ class Face(Base):
 
     # Image storage path (for training purposes)
     image_path: Mapped[Optional[str]] = mapped_column(Text)
-
+    
+    # Global Blacklist sharing
+    is_global_blacklist: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    
     # embedding is vector(512), mapped as custom type or ignored in basic ORM
     # We'll rely on raw SQL for inserting embedding, but ORM can read name/id
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     organization: Mapped[Optional["Organization"]] = relationship("Organization")
+
+class BlacklistSharingLog(Base):
+    __tablename__ = "blacklist_sharing_log"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    face_id: Mapped[int] = mapped_column(Integer, ForeignKey("faces.id", ondelete="CASCADE"))
+    shared_by_org_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("organizations.id"))
+    action: Mapped[str] = mapped_column(String(50))  # SHARED, UNSHARED
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    
+    face: Mapped["Face"] = relationship("Face")
+    organization: Mapped["Organization"] = relationship("Organization")
 
 class NotificationChannelType(str, enum.Enum):
     EMAIL = "EMAIL"

@@ -439,7 +439,7 @@ class SecurityProcessor(BaseProcessor):
                                      )
                                      self.lpr_cooldowns[camera_id][plate_text] = curr_t
                                  
-                         cv2.putText(frame_viz, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                         cv2.putText(frame_viz, label, (x1, y1-5), 1, 0.5, color, 2)
             # --- END VEHICLE RESULTS ---
 
             cfg = config_data # Alias for below
@@ -500,7 +500,7 @@ class SecurityProcessor(BaseProcessor):
                             
                             # Visual Alert on Frame
                             cv2.putText(annotated_frame, f"ACTION: {action.upper()}", (50, 50), 
-                                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+                                        1, 1.5, (0, 0, 255), 4)
             
             # --- Global Events (e.g. Video Fight Detection) ---
             if hasattr(pp_results, 'global_events') and pp_results.global_events:
@@ -529,7 +529,7 @@ class SecurityProcessor(BaseProcessor):
                                   })
                               
                               cv2.putText(annotated_frame, "FIGHT DETECTED", (50, 100), 
-                                          cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 4)
+                                          1, 1.5, (0, 0, 255), 4)
 
             # --- ReID Processing (Forensic Search) ---
             if hasattr(pp_results, 'reid_features') and pp_results.reid_features:
@@ -585,7 +585,7 @@ class SecurityProcessor(BaseProcessor):
                                  "message": f"Intrusion detected on {camera_id}"
                              })
                  
-                 cv2.putText(annotated_frame, "INTRUSION DETECTED!", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                 cv2.putText(annotated_frame, "INTRUSION DETECTED!", (10, 150), 1, 1.0, (0, 0, 255), 3)
 
             # C. Face Recognition (Visualization)
             if "face" in features:
@@ -593,7 +593,7 @@ class SecurityProcessor(BaseProcessor):
                 for (bbox, name, color) in faces_data:
                     x1, y1, x2, y2 = bbox
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(annotated_frame, name, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                    cv2.putText(annotated_frame, name, (x1, y1 - 10), 1, 0.8, color, 2)
 
 
 

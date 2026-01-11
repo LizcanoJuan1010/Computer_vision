@@ -55,8 +55,14 @@ class FaceModel(BaseModel):
         print(f"  - Detection (YuNet): {self.det_model_path}")
         print(f"  - Recognition (GhostFaceNetV2): {self.rec_model_path}")
 
+        # Check primary path, fallback to alternative
         if not os.path.exists(self.det_model_path):
-            print(f"WARNING: Face detection model not found at {self.det_model_path}")
+            alt_path = getattr(config, 'FACE_DET_MODEL_PATH_ALT', None)
+            if alt_path and os.path.exists(alt_path):
+                print(f"  ⚠️ Using fallback YuNet path: {alt_path}")
+                self.det_model_path = alt_path
+            else:
+                print(f"WARNING: Face detection model not found at {self.det_model_path}")
         
         if not os.path.exists(self.rec_model_path):
             print(f"WARNING: Face recognition model not found at {self.rec_model_path}")
@@ -148,9 +154,14 @@ class FaceModel(BaseModel):
             h, w, _ = frame.shape
             
             # YuNet requires setting input size matching the image (or scale image)
-            self.detector.setInputSize((w, h))
+            # Ensure native ints for OpenCV
+            self.detector.setInputSize((int(w), int(h)))
             
             # Detect
+            # Ensure frame is contiguous
+            if not frame.flags['C_CONTIGUOUS']:
+                frame = np.ascontiguousarray(frame)
+                
             _, faces = self.detector.detect(frame)
             
             if faces is not None:

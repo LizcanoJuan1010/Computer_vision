@@ -18,8 +18,8 @@ import (
 var FramesCaptured uint64
 var FramesDropped uint64
 
-func CaptureWorker(cam config.CameraConfig, cfg *config.Config, out chan<- Frame) {
-	defer close(out)
+func CaptureWorker(cam config.CameraConfig, cfg *config.Config, out chan<- Frame, boostHandler *FPSBoostHandler) {
+	// defer close(out) -- Removed to prevent double-close panic (managed by CameraManager)
 
 	// Initialize Stream Manager
 	ctx := context.Background()
@@ -30,20 +30,49 @@ func CaptureWorker(cam config.CameraConfig, cfg *config.Config, out chan<- Frame
 		log.Printf("[%s] Warning: Using default reconnection settings", cam.Name)
 	}
 
-	// Configure RTSP Transport (tcp or udp)
+	// ✅ Initialize FPS Manager for dynamic FPS adjustment
+	dbHost := os.Getenv("DB_HOST")
+	dbPort := os.Getenv("DB_PORT")
+	dbUser := os.Getenv("DB_USER")
+	dbPass := os.Getenv("DB_PASSWORD")
+	dbName := os.Getenv("DB_NAME")
+	dbConnStr := fmt.Sprintf("postgres://%s:%s@%s:%s/%s", dbUser, dbPass, dbHost, dbPort, dbName)
+
+	// Default to Normal, actual priority will be loaded from DB
+	priority := PriorityNormal
+
+	fpsManager := NewFPSManager(ctx, cam.ID, priority, cfg.TargetFPS, dbConnStr)
+
+	// Try to load priority from DB (overrides meta_info if DB has different value)
+	if err := fpsManager.LoadPriorityFromDB(); err != nil {
+		log.Printf("[%s] Warning: Could not load priority from DB, using default: %s", cam.Name, priority)
+	}
+
+	// Start GPU monitoring goroutine (checks every 10 seconds for emergency throttle)
+	go fpsManager.MonitorGPU(10 * time.Second)
+
+	// Register FPSManager with global boost handler (if available)
+	if boostHandler != nil {
+		boostHandler.RegisterFPSManager(cam.ID, fpsManager)
+	}
+
+	log.Printf("[%s] ✅ FPSManager initialized (Priority: %s, Target: %.1f FPS)", cam.Name, fpsManager.GetPriority(), fpsManager.GetTargetFPS())
+
+	// Configure RTSP Transport (tcp or udp) with extended options
 	transport := os.Getenv("RTSP_TRANSPORT")
 	if transport == "" {
 		transport = "tcp" // Default to TCP if not set
 	}
-	os.Setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;"+transport)
+	// Add analyzeduration and probesize to fix "Could not find codec parameters" error
+	ffmpegOpts := "rtsp_transport;" + transport + "|analyzeduration;50000000|probesize;50000000"
+	os.Setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", ffmpegOpts)
+	log.Printf("[%s] FFMPEG options: %s", cam.Name, ffmpegOpts)
 
 	frameCount := 0
 	var localFramesCaptured int64
 	var localFramesDropped int64
 	var connectionStartTime time.Time
 
-	// Calculate interval based on FPS
-	frameInterval := time.Second / time.Duration(cfg.TargetFPS)
 	var lastFrameTime time.Time
 	var lastHealthReport time.Time
 
@@ -89,6 +118,10 @@ func CaptureWorker(cam config.CameraConfig, cfg *config.Config, out chan<- Frame
 			continue
 		}
 
+		// Try to set frame width/height to force codec initialization
+		webcam.Set(gocv.VideoCaptureFrameWidth, 1920)
+		webcam.Set(gocv.VideoCaptureFrameHeight, 1080)
+
 		// Connection successful!
 		streamMgr.OnConnectionSuccess()
 		log.Printf("[%s] Video source connected. Took %v", cam.Name, time.Since(connectionStartTime))
@@ -112,10 +145,12 @@ func CaptureWorker(cam config.CameraConfig, cfg *config.Config, out chan<- Frame
 				continue
 			}
 
-			// Check if it's time to process this frame
+			// Check if it's time to process this frame (using dynamic FPS)
 			now := time.Now()
+			frameInterval := fpsManager.GetFrameInterval()
+			
 			if now.Sub(lastFrameTime) < frameInterval {
-				// Too fast, drop it to match TargetFPS
+				// Too fast, drop it to match current FPS
 				img.Close()
 				localFramesDropped++
 				continue
@@ -177,6 +212,5 @@ func resolveURL(rawURL string) string {
 			res = strings.ReplaceAll(res, k, v)
 		}
 	}
-	// Fallback/Safety: Log if braces remain? Or just return.
 	return res
 }

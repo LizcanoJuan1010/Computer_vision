@@ -200,3 +200,4 @@ class FaceModel(BaseModel):
         if single_input:
             return results[0]
         return results
+

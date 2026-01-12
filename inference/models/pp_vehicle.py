@@ -6,8 +6,10 @@ import os
 import cv2
 import numpy as np
 import paddle
+
 from ..config import config
 from .lpr import LPRModel
+from .detection import RTDETRModel # Import ONNX backend
 
 # COCO class IDs for vehicles
 VEHICLE_CLASSES = {
@@ -31,89 +33,33 @@ class PPVehicleResult:
 
 class PPVehicleModel:
     """
-    Vehicle Detection using RT-DETR + LPR
-    
-    Shares the same RT-DETR model as human detection but filters
-    for vehicle classes and runs LPR on each detected vehicle.
+    Vehicle Detection using RT-DETR (ONNX) + LPR
     """
     
     def __init__(self, model_dir=None, lpr_model=None):
-        self.model_dir = model_dir or "/app/weights/human_det/exported"
-        self.predictor = None
+        # Default to ONNX path
+        self.model_path = "/app/weights/human_det/rtdetr_r18.onnx"
+        self.rt_detr = RTDETRModel(self.model_path)
         self.lpr_model = lpr_model
-        self.input_size = (640, 640)
+        
         self.conf_threshold = 0.4
-        self._next_track_id = 10000  # Start high to avoid collision with human IDs
+        self._next_track_id = 10000  # Start high
         self._track_history = {}
         
     def load(self):
-        """Load RT-DETR model for vehicle detection"""
-        print(f"🚗 Loading PP-Vehicle (RT-DETR) from {self.model_dir}...", flush=True)
-        
-        # Check for exported model
-        model_file = os.path.join(self.model_dir, "model.pdmodel")
-        params_file = os.path.join(self.model_dir, "model.pdiparams")
-        
-        if not os.path.exists(model_file):
-            # Try alternate paths
-            alt_paths = [
-                "/app/weights/human_det",
-                "/app/PaddleDetection/output_inference/rtdetr_r18vd_6x_coco"
-            ]
-            for alt in alt_paths:
-                model_file = os.path.join(alt, "model.pdmodel")
-                params_file = os.path.join(alt, "model.pdiparams")
-                if os.path.exists(model_file):
-                    self.model_dir = alt
-                    break
-                    
-        if not os.path.exists(model_file):
-            print(f"❌ Vehicle model not found - will use stub mode", flush=True)
-            return
-            
+        """Load RT-DETR ONNX model"""
+        print(f"🚗 Loading PP-Vehicle (ONNX) from {self.model_path}...", flush=True)
         try:
-            # Configure Paddle Inference
-            paddle_config = paddle.inference.Config(model_file, params_file)
-            
-            if paddle.is_compiled_with_cuda():
-                paddle_config.enable_use_gpu(512, 0)  # 512MB for vehicle
-                
-                if config.USE_TENSORRT:
-                    paddle_config.enable_tensorrt_engine(
-                        workspace_size=1 << 29,  # 512MB
-                        max_batch_size=1,
-                        min_subgraph_size=3,
-                        precision_mode=paddle.inference.PrecisionType.Half,
-                        use_static=False,
-                        use_calib_mode=False
-                    )
-                    
-                paddle_config.enable_memory_optim()
-            else:
-                paddle_config.disable_gpu()
-                paddle_config.enable_mkldnn()
-                
-            self.predictor = paddle.inference.create_predictor(paddle_config)
-            print(f"✅ PP-Vehicle Loaded.", flush=True)
-            
+            self.rt_detr.load()
+            print(f"✅ PP-Vehicle (ONNX) Loaded.", flush=True)
         except Exception as e:
-            print(f"❌ Failed to load PP-Vehicle: {e}", flush=True)
-            self.predictor = None
+            print(f"❌ Failed to load PP-Vehicle (ONNX): {e}", flush=True)
 
     def predict(self, frames, camera_ids=None):
         """
         Detect vehicles and run LPR on each
-        
-        Args:
-            frames: List of frames (numpy arrays)
-            camera_ids: Optional camera IDs for tracking
-            
-        Returns:
-            List of PPVehicleResult
         """
-        if self.predictor is None:
-            return [PPVehicleResult() for _ in (frames if isinstance(frames, list) else [frames])]
-            
+        # Ensure list
         if not isinstance(frames, list):
             frames = [frames]
             
@@ -127,39 +73,18 @@ class PPVehicleModel:
             cam_id = camera_ids[i] if camera_ids else f"cam_{i}"
             
             try:
-                # Preprocess
-                img, scale_factor, im_shape = self._preprocess(frame)
+                # 1. Run RT-DETR (ONNX)
+                boxes, scores, cls_ids = self.rt_detr.predict(frame)
                 
-                # Set inputs
-                input_names = self.predictor.get_input_names()
-                for name in input_names:
-                    handle = self.predictor.get_input_handle(name)
-                    if 'image' in name.lower() or 'im' == name:
-                        handle.copy_from_cpu(img)
-                    elif 'scale' in name.lower():
-                        handle.copy_from_cpu(scale_factor)
-                    elif 'shape' in name.lower():
-                        handle.copy_from_cpu(im_shape)
-                        
-                # Run inference
-                self.predictor.run()
-                
-                # Get outputs
-                output_names = self.predictor.get_output_names()
-                outputs = {}
-                for name in output_names:
-                    outputs[name] = self.predictor.get_output_handle(name).copy_to_cpu()
-                    
-                # Parse detections
-                detections = self._parse_outputs(outputs, frame.shape[:2])
-                
-                # Filter for vehicles only
+                # 2. Filter & Track
                 vehicle_idx = 0
-                for det in detections:
-                    cls_id, score, x1, y1, x2, y2 = det
-                    cls_id = int(cls_id)
+                for j in range(len(boxes)):
+                    box = boxes[j]
+                    score = scores[j]
+                    cls_id = int(cls_ids[j])
                     
                     if cls_id in VEHICLE_CLASSES and score > self.conf_threshold:
+                        x1, y1, x2, y2 = box
                         track_id = self._assign_track_id(cam_id, [x1, y1, x2, y2])
                         
                         result.boxes.append([x1, y1, x2, y2])
@@ -168,7 +93,7 @@ class PPVehicleModel:
                         result.conf.append(float(score))
                         result.vehicle_types[vehicle_idx] = VEHICLE_CLASSES[cls_id]
                         
-                        # Run LPR on vehicle crop
+                        # 3. Run LPR on vehicle crop
                         if self.lpr_model:
                             x1i, y1i, x2i, y2i = map(int, [x1, y1, x2, y2])
                             h, w = frame.shape[:2]
@@ -177,71 +102,23 @@ class PPVehicleModel:
                             y1i = max(0, min(y1i, h))
                             y2i = max(0, min(y2i, h))
                             
-                            if (x2i - x1i) > 50 and (y2i - y1i) > 50:
+                            if (x2i - x1i) > 20 and (y2i - y1i) > 20: # Min crop 20x20
                                 crop = frame[y1i:y2i, x1i:x2i]
                                 lpr_result = self.lpr_model.predict(crop)
                                 if lpr_result.label:
+                                    # print(f"🚗 Found Plate: {lpr_result.label}", flush=True)
                                     result.plates[vehicle_idx] = lpr_result.label
                                     
                         vehicle_idx += 1
                         
             except Exception as e:
                 print(f"❌ PP-Vehicle inference error: {e}", flush=True)
+                # import traceback
+                # traceback.print_exc()
                 
             results.append(result)
             
         return results
-        
-    def _preprocess(self, frame):
-        """Preprocess frame for RT-DETR"""
-        h, w = frame.shape[:2]
-        target_h, target_w = self.input_size
-        
-        resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-        
-        img = resized.astype(np.float32) / 255.0
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        img = (img - mean) / std
-        
-        img = img.transpose((2, 0, 1))
-        img = np.expand_dims(img, axis=0)
-        img = np.ascontiguousarray(img)
-        
-        scale_factor = np.array([[float(target_h) / h, float(target_w) / w]], dtype=np.float32)
-        im_shape = np.array([[float(target_h), float(target_w)]], dtype=np.float32)
-        
-        return img, scale_factor, im_shape
-        
-    def _parse_outputs(self, outputs, original_shape):
-        """Parse RT-DETR outputs"""
-        detections = []
-        
-        for name, tensor in outputs.items():
-            if tensor.ndim == 2 and tensor.shape[1] == 6:
-                for row in tensor:
-                    if row[1] > 0.01:
-                        detections.append(row.tolist())
-            elif tensor.ndim == 3:
-                for row in tensor[0]:
-                    if row[1] > 0.01:
-                        detections.append(row.tolist())
-                        
-        h, w = original_shape
-        th, tw = self.input_size
-        scale_x = w / tw
-        scale_y = h / th
-        
-        scaled = []
-        for det in detections:
-            cls_id, score, x1, y1, x2, y2 = det
-            scaled.append([
-                cls_id, score,
-                x1 * scale_x, y1 * scale_y,
-                x2 * scale_x, y2 * scale_y
-            ])
-            
-        return scaled
         
     def _assign_track_id(self, camera_id, box, iou_threshold=0.5):
         """Simple IOU-based tracking"""

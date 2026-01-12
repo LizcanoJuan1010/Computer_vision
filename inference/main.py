@@ -35,7 +35,7 @@ from .database import Database
 from .models.pp_human import PPHumanModel
 from .models.pp_vehicle import PPVehicleModel # Added
 from .models.face import FaceModel
-from .models.lpr import LPRModel
+from .models.lpr_onnx import LPRModelONNX # Changed from .lpr
 from .processors.security import SecurityProcessor
 from .loader import load_blacklist
 from .cache.face_cache_lfu import FaceCacheLFU
@@ -176,25 +176,26 @@ async def run():
 
 
     try:
+        # 3. LPR Model (ONNX - Stable)
+        print("Loading LPR Model (ONNX)...")
+        lpr_model = LPRModelONNX()
+        lpr_model.load()
+        # lpr_model = None
+
         print("Loading PP-Human Model...")
         pp_human_model = PPHumanModel()
         pp_human_model.load()
+        
         print("Loading Face Model...")
         face_model = FaceModel()
         face_model.load()
         
-        # 3. LPR Model (Used by Vehicle Model)
-        # print("Loading LPR Model...")
-        # lpr_model = LPRModel()
-        # lpr_model.load()
-        lpr_model = None
-        
         # 3.5 Vehicle Model (Wraps LPR)
-        # print("Loading PP-Vehicle Model...")
-        # pp_vehicle_weights = config.PPHUMAN_DET_MODEL_DIR  # RT-DETR shared model
-        # vehicle_model = PPVehicleModel(model_dir=pp_vehicle_weights, lpr_model=lpr_model)
-        # vehicle_model.load()
-        vehicle_model = None
+        print("Loading PP-Vehicle Model...")
+        pp_vehicle_weights = config.PPHUMAN_DET_MODEL_DIR  # RT-DETR shared model
+        vehicle_model = PPVehicleModel(model_dir=pp_vehicle_weights, lpr_model=lpr_model)
+        vehicle_model.load()
+        # vehicle_model = None
 
     except Exception as e:
         print(f"❌ Model Load Failed: {e}")
@@ -208,7 +209,8 @@ async def run():
         db=db, 
         yolo_model=pp_human_model, 
         face_model=face_model, 
-        vehicle_model=vehicle_model, # Passed here (None)
+        vehicle_model=None, # Vehicle Model is broken on this HW
+        lpr_model=lpr_model, # Pass ONNX LPR model
         face_cache=face_cache,
         loop=loop
     )
@@ -223,24 +225,31 @@ async def run():
     
     async def mjpeg_handler(request):
         camera_id = request.match_info.get('camera_id')
+        print(f"📹 MJPEG Request for camera: {camera_id}", flush=True)
+        print(f"📹 Available frames: {list(latest_annotated_frames.keys())}", flush=True)
+        
         response = web.StreamResponse(
             status=200, reason='OK',
             headers={'Content-Type': 'multipart/x-mixed-replace;boundary=frame'}
         )
         await response.prepare(request)
+        frame_count = 0
         try:
             while True:
                 if camera_id in latest_annotated_frames:
                     frame = latest_annotated_frames[camera_id]
                     if frame is not None:
+                        frame_count += 1
+                        if frame_count == 1:
+                            print(f"📹 First frame found for {camera_id}, shape: {frame.shape}", flush=True)
                         # Convert RGB back to BGR for OpenCV encoding
                         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
                         ret, buffer = cv2.imencode('.jpg', frame_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
                         if ret:
                             await response.write(b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
                 await asyncio.sleep(0.033)  # ~30 FPS
-        except:
-            pass
+        except Exception as e:
+            print(f"❌ MJPEG Error: {e}", flush=True)
         return response
 
     app = web.Application()
@@ -362,9 +371,24 @@ async def run():
                             print(f"📦 Batch: {len(batch_ids)} cams | Latency: {latency_ms:.1f}ms | FPS: {1000/latency_ms if latency_ms > 0 else 0:.1f}", flush=True)
 
                         # Update debug streams
-                        if processed and len(processed) == len(batch_ids):
-                            for cid, frame in zip(batch_ids, processed):
+                        processed_frames, batch_meta = processed if processed else ([], [])
+                        if processed_frames and len(processed_frames) == len(batch_ids):
+                            for cid, frame in zip(batch_ids, processed_frames):
                                 latest_annotated_frames[cid] = frame
+                        
+                        # ✅ PUBLISH METADATA TO NATS
+                        if batch_meta and len(batch_meta) == len(batch_ids):
+                            print(f"📢 Publishing batch of {len(batch_meta)} items", flush=True)
+                            for cid, meta in zip(batch_ids, batch_meta):
+                                try:
+                                    subject = f"camera.debug.{cid}"
+                                    # print(f"📤 Publishing to {subject}", flush=True)
+                                    payload = json.dumps(meta).encode()
+                                    await nc.publish(subject, payload)
+                                except Exception as e:
+                                    print(f"⚠️ NATS Publish Error: {e}", flush=True)
+                        else:
+                             print(f"⚠️ Batch Mismatch: IDs={len(batch_ids)} Meta={len(batch_meta) if batch_meta else 'None'}", flush=True)
                     
                     FRAMES_PROCESSED.inc(len(batch_ids))
                     

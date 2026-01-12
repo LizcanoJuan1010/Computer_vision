@@ -48,6 +48,10 @@ services:
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=user
+      - HIK_USER=${HIK_USER}
+      - HIK_PASS=${HIK_PASS}
+      - HIK_IP=${HIK_IP}
+      - PORT_RTSP=${PORT_RTSP}
       - DB_PASSWORD=password
       - DB_NAME=vigias
     ports:
@@ -80,8 +84,8 @@ services:
       - PORT_RTSP=${PORT_RTSP}
       - PORT_HTTP=${PORT_HTTP}
       # Ingest config
-      - RESIZE_WIDTH=640
-      - RESIZE_HEIGHT=360
+      - RESIZE_WIDTH=1280
+      - RESIZE_HEIGHT=720
       - TARGET_FPS=30.0
       - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
     ports:

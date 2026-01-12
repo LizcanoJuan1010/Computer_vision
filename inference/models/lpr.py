@@ -53,13 +53,18 @@ class LPRModel(BaseModel):
         
         if use_server:
             print("✅ Using PP-OCRv4 Server models", flush=True)
-            self.model = PaddleOCR(
-                use_angle_cls=True,
-                lang='en',
-                det_model_dir=self.det_model_dir,
-                rec_model_dir=self.rec_model_dir,
-                cls_model_dir=self.cls_model_dir
-            )
+            try:
+                self.model = PaddleOCR(
+                    use_angle_cls=True,
+                    lang='en',
+                    det_model_dir=self.det_model_dir,
+                    rec_model_dir=self.rec_model_dir,
+                    cls_model_dir=self.cls_model_dir
+                )
+            except Exception as e:
+                print(f"❌ PaddleOCR Init Error: {e}", flush=True)
+                raise e
+            print("✅ PaddleOCR Init Success", flush=True)
         else:
             print("⚠️ Server models not found, using default mobile models", flush=True)
             self.model = PaddleOCR(

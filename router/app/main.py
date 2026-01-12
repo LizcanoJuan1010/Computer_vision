@@ -2,7 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-import uvloop
+# import uvloop
 import nats
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,10 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.services.cache import router_cache
 from app.services.dispatcher import Dispatcher
-from app.api.routes import router as api_router
+from app.api.routes import main_api_router as api_router
+from app.api.routes.debug import router as debug_router
 
 # 1. Activate uvloop for maximum performance
-asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+# asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 # Logging setup
 logging.basicConfig(level=settings.LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -112,6 +113,7 @@ app.add_middleware(
 
 # Include API Routes
 app.include_router(api_router)
+app.include_router(debug_router, prefix="/ws/debug", tags=["Debug"])
 
 if __name__ == "__main__":
     # For local debugging

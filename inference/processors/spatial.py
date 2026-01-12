@@ -146,6 +146,10 @@ class SpatialAnalytics:
         if frame is None or frame.size == 0:
             return frame
             
+        # DEBUG FRAME STATS
+        mean_val = np.mean(frame)
+        print(f"DEBUG-SPATIAL Frame Mean: {mean_val:.2f} Shape: {frame.shape}", flush=True)
+            
         try:
              # OpenCV is BGR, PIL needs RGB
              frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -211,12 +215,12 @@ class SpatialAnalytics:
                  x2 = max(0, min(width, x2))
                  y2 = max(0, min(height, y2))
                  
-                 tid = detections.tracker_id[i] if detections.tracker_id is not None else None
-                 
                  # Color Logic
                  color = (0, 255, 0) # Green (Safe)
                  if tid is not None and tid in intrusion_ids:
                      color = (255, 0, 0) # Red (Intrusion)
+
+                 # print(f"DEBUG-SPATIAL Drawing Box: {x1},{y1},{x2},{y2} Color: {color}", flush=True)
                  
                  # 1. Draw Rectangle
                  draw.rectangle([x1, y1, x2, y2], outline=color, width=3)

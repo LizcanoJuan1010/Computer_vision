@@ -6,12 +6,12 @@ from .core import BaseProcessor
 from .spatial import SpatialAnalytics
 
 class SecurityProcessor(BaseProcessor):
-    def __init__(self, db, yolo_model, face_model, vehicle_model, face_cache=None, publish_callback=None, loop=None):
+    def __init__(self, db, yolo_model, face_model, vehicle_model, lpr_model=None, face_cache=None, publish_callback=None, loop=None):
         self.db = db
         self.yolo_model = yolo_model
         self.face_model = face_model
         self.vehicle_model = vehicle_model # Renamed/Added
-        # self.lpr_model = lpr_model # Removed, now inside vehicle_model
+        self.lpr_model = lpr_model # Added (ONNX LPR)
         self.face_cache = face_cache  # FaceCacheLFU instance
         self.publish_callback = publish_callback
         self.loop = loop # Main Event Loop for thread-safe async calls
@@ -122,6 +122,7 @@ class SecurityProcessor(BaseProcessor):
              # Let's pass 'frames' (CPU) for safety in this iteration, or 'gpu_frames' if bold.
              # Safe bet: pass frames.
              pp_vehicle_results = self.vehicle_model.predict(frames, camera_ids=camera_ids)
+             print(f"🚙 DEBUG-VEHICLE: Results for {len(camera_ids)} cams. Has plates? {any(r.plates for r in pp_vehicle_results) if pp_vehicle_results else 'No'}", flush=True)
         
         # --- 3. Prepare Face Recognition Batch (with Track Caching) ---
         face_crops = []
@@ -143,6 +144,7 @@ class SecurityProcessor(BaseProcessor):
              config_data = configs[i]
              features = config_data.get("features", []) if config_data else ["face", "line_crossing", "intrusion"]
              camera_id = camera_ids[i]
+             print(f"⚙️ DEBUG-CONFIG [{camera_id}] Enabled Features: {features}", flush=True)
              
              if "face" in features and hasattr(pp_results, 'boxes'):
                  for j, bbox_raw in enumerate(pp_results.boxes):
@@ -340,6 +342,8 @@ class SecurityProcessor(BaseProcessor):
 
         # --- 4. Spatial Analysis & Visualization (Per Frame) ---
         processed_frames = []
+        batch_metadata = [] # List of dicts per frame
+
         
         TARGET_SIZE = (640, 640)  # Visualization size
         
@@ -605,21 +609,160 @@ class SecurityProcessor(BaseProcessor):
 
 
 
+            # Store Metadata for this frame (Normalized 0-1)
+            # Frame is already resized to TARGET_SIZE (640x640) for viz, but detections in 'pp_results' 
+            # were scaled to this TARGET_SIZE in lines 360-365.
+            # So we use TARGET_SIZE to normalize.
+            t_w, t_h = TARGET_SIZE
+
+            frame_meta = {
+                "camera_id": camera_id,
+                "timestamp": time.time(),
+                "faces": [],
+                "vehicles": [],
+                "persons": [], # Added for frontend visualization
+                "zones": { # Static data (polygons)
+                    "intrusion": [], 
+                    "line_crossing": []
+                }
+            }
+
+            # Add Zones (Normalized)
+            if "intrusion" in features and "intrusion" in zones:
+                 poly = zones["intrusion"].get("points", [])
+                 # Poly is list of [x,y] (likely relative 0-1 or absolute?)
+                 # Standard in this project seems to be 0-1 for config? 
+                 # Let's assume config is 0-1 as per standard SpatialAnalytics.
+                 # If config is 0-1, pass directly.
+                 frame_meta["zones"]["intrusion"] = poly
+                 
+            if "line_crossing" in features and "line_crossing" in zones:
+                 line = zones["line_crossing"].get("points", [])
+                 frame_meta["zones"]["line_crossing"] = line
+
+            # Add Face Data
+            if "face" in features:
+                faces_data = face_results_map[i]
+                for (bbox, name, color) in faces_data:
+                     # bbox is absolute (x1, y1, x2, y2) in TARGET_SIZE scale
+                     nx1, ny1, nx2, ny2 = bbox[0]/t_w, bbox[1]/t_h, bbox[2]/t_w, bbox[3]/t_h
+                     frame_meta["faces"].append({
+                         "bbox": [nx1, ny1, nx2, ny2], 
+                         "name": name
+                     })
+
+            # Add Vehicle Data
+            if i < len(pp_vehicle_results):
+                 veh_res = pp_vehicle_results[i]
+                 if hasattr(veh_res, 'boxes'):
+                     for k, bbox in enumerate(veh_res.boxes):
+                         cls_id = int(veh_res.cls[k])
+                         score = float(veh_res.conf[k])
+                         bx1, by1, bx2, by2 = map(int, bbox)
+                         
+                         # Normalize
+                         nbx1, nby1, nbx2, nby2 = bx1/t_w, by1/t_h, bx2/t_w, by2/t_h
+                         
+                         label = "Vehicle"
+                         if cls_id == 0: label = "Car"
+                         elif cls_id == 1: label = "Truck"
+                         elif cls_id == 2: label = "Bus"
+                         elif cls_id == 3: label = "Moto"
+                         
+                         plate = None
+                         if veh_res.plates:
+                             plate = veh_res.plates.get(k)
+                             
+                         frame_meta["vehicles"].append({
+                             "bbox": [nbx1, nby1, nbx2, nby2],
+                             "label": label,
+                             "lpr": plate,
+                             "score": score
+                         })
+
+            # Add Person Data (Generic Object Detection)
+            if hasattr(pp_results, 'boxes'):
+                 for k, bbox in enumerate(pp_results.boxes):
+                     # cls and conf might be tensors or numpy arrays, ensure float/int conversion
+                     # PP-Human results structure check:
+                     # .boxes is list of [x1, y1, x2, y2]
+                     # .cls is list of class IDs
+                     # .conf is list of scores
+                     
+                     try:
+                         cls_id = int(pp_results.cls[k])
+                         score = float(pp_results.conf[k])
+                         print(f"🕵️ DEBUG DET: cls_id={cls_id} score={score:.4f}", flush=True)
+
+                         if cls_id == 0: # 0 is Person in COCO/PP-YOLOE
+                             bx1, by1, bx2, by2 = map(int, bbox)
+                             
+                             # Normalize using TARGET_SIZE (since pp_results.boxes were scaled to TARGET_SIZE in line 365)
+                             # Ensure coordinates are within bounds
+                             nbx1 = max(0, min(1, bx1 / t_w))
+                             nby1 = max(0, min(1, by1 / t_h))
+                             nbx2 = max(0, min(1, bx2 / t_w))
+                             nby2 = max(0, min(1, by2 / t_h))
+                             
+                             frame_meta["persons"].append({
+                                 "bbox": [nbx1, nby1, nbx2, nby2],
+                                 "score": score
+                             })
+                             
+                         elif cls_id in [2, 3, 5, 7]: # Vehicles
+                             bx1, by1, bx2, by2 = map(int, bbox)
+                             nbx1 = max(0, min(1, bx1 / t_w))
+                             nby1 = max(0, min(1, by1 / t_h))
+                             nbx2 = max(0, min(1, bx2 / t_w))
+                             nby2 = max(0, min(1, by2 / t_h))
+                             
+                             label = "Vehicle"
+                             if cls_id == 2: label = "Car"
+                             elif cls_id == 7: label = "Truck"
+                             elif cls_id == 5: label = "Bus"
+                             elif cls_id == 3: label = "Moto"
+                            
+                             # Run LPR (ONNX)
+                             plate_text = None
+                             if self.lpr_model and "lpr" in features:
+                                 try:
+                                     # Crop Vehicle
+                                     original = frame
+                                     vh, vw = original.shape[:2]
+                                     vx1 = max(0, min(bx1, vw)); vy1 = max(0, min(by1, vh))
+                                     vx2 = max(0, min(bx2, vw)); vy2 = max(0, min(by2, vh))
+                                     
+                                     if (vx2 - vx1) > 20 and (vy2 - vy1) > 20:
+                                         vehicle_crop = original[int(vy1):int(vy2), int(vx1):int(vx2)]
+                                         # Predict
+                                         lpr_result = self.lpr_model.predict(vehicle_crop)
+                                         if lpr_result.label:
+                                             plate_text = lpr_result.label
+                                             print(f"🈯 Plate Detected: {plate_text} on {label}", flush=True)
+
+                                 except Exception as e:
+                                     print(f"LPR Crop Error: {e}", flush=True)
+                            
+                             frame_meta["vehicles"].append({
+                                 "bbox": [nbx1, nby1, nbx2, nby2],
+                                 "label": label,
+                                 "lpr": plate_text,
+                                 "score": score
+                             })
+                             # print(f"🚗 {label} detected: {score:.2f} at {frame_meta['vehicles'][-1]['bbox']}", flush=True)
+                     except Exception as e:
+                         # Safeguard against index errors or type issues
+                         pass
+
+            batch_metadata.append(frame_meta)
             processed_frames.append(annotated_frame)
 
-            # D. Headless Check (Only imshow if local)
-            import os
-            if os.getenv("HEADLESS", "false").lower() != "true":
-                try:
-                    cv2.imshow(f"VIGIAS-IA - {camera_id}", annotated_frame)
-                    cv2.waitKey(1)
-                except: pass
-                
-        return processed_frames
+        return processed_frames, batch_metadata
 
     def process(self, frame, camera_id=None, config=None):
         # Wrapper for single frame
-        return self.process_batch([frame], [camera_id], [config])[0]
+        frames, meta = self.process_batch([frame], [camera_id], [config])
+        return frames[0]
 
     # _draw_yolo_results removed as it is replaced by SpatialAnalytics visualization
 

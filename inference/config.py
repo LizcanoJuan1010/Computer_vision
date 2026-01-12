@@ -70,7 +70,7 @@ class Config:
     TENSORRT_PRECISION = os.getenv("TENSORRT_PRECISION", "fp16") # fp16, fp32, int8 
 
     # Defaults
-    DEFAULT_DET_CONFIDENCE = 0.5
+    DEFAULT_DET_CONFIDENCE = 0.3
     DEFAULT_INTRUSION_CLASSES = [0] # Persons
     DEFAULT_INTRUSION_DEBOUNCE = 3.0 
     DEFAULT_LINE_CROSSING_CLASSES = [0, 2, 5, 7] # Person, Car, Bus, Truck

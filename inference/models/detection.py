@@ -113,6 +113,7 @@ class RTDETRModel:
             
             if len(data) > 0:
                  scores = data[:, 4]
+                 print(f"🕵️ DET Raw Max Score (Single): {scores.max():.4f}", flush=True) # DEBUG
                  mask = scores > config.DEFAULT_DET_CONFIDENCE
                  filtered = data[mask]
                  
@@ -151,28 +152,56 @@ class RTDETRModel:
              max_scores = raw_scores.max(axis=1) # [300]
              cls_ids = raw_scores.argmax(axis=1) # [300]
              
+             print(f"🕵️ DET Raw Max Score: {max_scores.max():.4f}", flush=True) # DEBUG
+             
              # 2. Filter
              mask = max_scores > config.DEFAULT_DET_CONFIDENCE
              
              filtered_boxes = raw_boxes[mask]
              filtered_scores = max_scores[mask]
              filtered_cls = cls_ids[mask]
+
+             if len(filtered_boxes) > 0:
+                 print(f"DEBUG RT-DETR Raw Box[0]: {filtered_boxes[0]}", flush=True)
              
              # 3. Add to results
+             # 3. Add to results
+             # Check if boxes are normalized (0-1) or absolute (0-640)
+             is_normalized = False
+             if len(filtered_boxes) > 0:
+                 if filtered_boxes.max() <= 1.0:
+                     is_normalized = True
+
              for i in range(len(filtered_boxes)):
-                 x1, y1, x2, y2 = filtered_boxes[i]
+                 box = filtered_boxes[i]
                  score = filtered_scores[i]
-                 cls_id = filtered_cls[i]
+                 cls_id = int(filtered_cls[i])
                  
-                 # Scale
-                 x1 = x1 * (orig_w / input_w)
-                 y1 = y1 * (orig_h / input_h)
-                 x2 = x2 * (orig_w / input_w)
-                 y2 = y2 * (orig_h / input_h)
+                 # RT-DETR normalized output is [cx, cy, w, h]
+                 # We need to convert to [x1, y1, x2, y2]
+                 if is_normalized:
+                     cx, cy, w, h = box
+                     x1 = cx - w / 2
+                     y1 = cy - h / 2
+                     x2 = cx + w / 2
+                     y2 = cy + h / 2
+                     
+                     # Scale to original image size
+                     x1 *= orig_w
+                     y1 *= orig_h
+                     x2 *= orig_w
+                     y2 *= orig_h
+                 else:
+                     # Fallback for absolute coordinates (legacy/unexpected)
+                     x1, y1, x2, y2 = box
+                     x1 = x1 * (orig_w / input_w)
+                     y1 = y1 * (orig_h / input_h)
+                     x2 = x2 * (orig_w / input_w)
+                     y2 = y2 * (orig_h / input_h)
                  
                  final_boxes.append([x1, y1, x2, y2])
                  final_scores.append(score)
-                 final_cls_ids.append(int(cls_id))
+                 final_cls_ids.append(cls_id)
                  
         else:
              # Helper fallback

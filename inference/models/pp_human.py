@@ -71,59 +71,78 @@ class PPHumanModel:
             import traceback
             traceback.print_exc()
 
-    def predict(self, frame, camera_ids=None):
+    def predict(self, frame_or_batch, camera_ids=None):
         """
-        Run detection + Pose + Action on a single frame
-        Returns: [PPHumanResult]
+        Run detection on a batch of frames
+        Returns: List[PPHumanResult] (one per frame)
         """
-        # Support batch of 1 for compatibility
-        if isinstance(frame, list):
-            frame = frame[0]
-            
-        # Handle camera_ids (if single frame, explicit id or default)
-        cam_id = "cam_0"
+        frames = frame_or_batch if isinstance(frame_or_batch, list) else [frame_or_batch]
+        
+        # Handle camera_ids
+        cam_ids_list = []
         if camera_ids:
-            if isinstance(camera_ids, list): cam_id = camera_ids[0]
-            else: cam_id = camera_ids
+            if isinstance(camera_ids, list): 
+                cam_ids_list = camera_ids
+            else: 
+                cam_ids_list = [camera_ids] * len(frames)
+        else:
+            cam_ids_list = ["cam_0"] * len(frames)
             
-        result = PPHumanResult()
+        results_list = []
         
         try:
-            # 1. Detection (RT-DETR ONNX)
-            boxes, scores, classes = self.det_model.predict(frame)
-            
-            person_boxes = []
-            
-            # Filter and Assign Tracks
-            for i, (box, score, cls_id) in enumerate(zip(boxes, scores, classes)):
-                if int(cls_id) == PERSON_CLASS_ID and score > self.conf_threshold:
-                    x1, y1, x2, y2 = box
-                    # Ensure coordinates are within image bounds?
-                    
-                    track_id = self._assign_track_id(cam_id, [x1, y1, x2, y2])
-                    
-                    result.boxes.append([x1, y1, x2, y2])
-                    result.id.append(track_id)
-                    result.cls.append(int(cls_id))
-                    result.conf.append(float(score))
-                    
-                    person_boxes.append([x1, y1, x2, y2])
-            
-            # 2. Pose Estimation
-            if person_boxes:
-                # PoseModel.predict expects list of frames and list of box-lists
-                pose_results = self.pose_model.predict([frame], [person_boxes])
-                frame_keypoints = pose_results[0] if pose_results else []
+            for i, frame in enumerate(frames):
+                cam_id = cam_ids_list[i] if i < len(cam_ids_list) else "unknown"
+                print(f"🕵️ PP-Human Processing Frame {i} [Cam {cam_id}] Shape: {frame.shape}", flush=True)
+                result = PPHumanResult()
                 
-                # 3. Action Logic (Placeholder)
-                pass
+                # 1. Detection (RT-DETR ONNX)
+                # Ensure predict handles single frame
+                boxes, scores, classes = self.det_model.predict(frame)
+                
+                person_boxes = []
+                
+                # Filter and Assign Tracks
+                for k, (box, score, cls_id) in enumerate(zip(boxes, scores, classes)):
+                    cls_id = int(cls_id)
+                    print(f"Raw Det [{cam_id}]: cls={cls_id} score={score:.4f}", flush=True) # DEBUG
+                    
+                    # Allow Person (0) and Vehicles (2=Car, 3=Moto, 5=Bus, 7=Truck)
+                    if (cls_id == 0 or cls_id in [2, 3, 5, 7]) and score > self.conf_threshold:
+                        x1, y1, x2, y2 = box
+                        
+                        track_id = self._assign_track_id(cam_id, [x1, y1, x2, y2])
+                        
+                        result.boxes.append([x1, y1, x2, y2])
+                        result.id.append(track_id)
+                        result.cls.append(int(cls_id))
+                        result.conf.append(float(score))
+                        
+                        if cls_id == 0:
+                           person_boxes.append([x1, y1, x2, y2])
+                
+                results_list.append(result)
+
+                # 2. Pose Estimation (Per Frame)
+                if person_boxes and self.pose_model:
+                     # Adapted to existing pose logic (expects lists)
+                     try:
+                        pose_results = self.pose_model.predict([frame], [person_boxes])
+                        # Assuming pose_results corresponds to person_boxes
+                        # We don't store keypoints in result yet?
+                        pass
+                     except Exception as pe:
+                        print(f"Pose Error: {pe}", flush=True)
 
         except Exception as e:
             print(f"❌ Pipeline error: {e}", flush=True)
             import traceback
             traceback.print_exc()
+            # Fill remaining results
+            while len(results_list) < len(frames):
+                results_list.append(PPHumanResult())
             
-        return [result]
+        return results_list
 
     def _assign_track_id(self, camera_id, box, iou_threshold=0.5):
         """Simple IOU Tracker"""

@@ -142,6 +142,8 @@ class SecurityProcessor(BaseProcessor):
              camera_id = camera_ids[i]
              print(f"⚙️ DEBUG-CONFIG [{camera_id}] Enabled Features: {features}", flush=True)
              
+             print(f"👤 DEBUG-FACE: Camera {camera_id}: 'face' in features = {'face' in features}, has_boxes = {hasattr(pp_results, 'boxes')}, num_boxes = {len(pp_results.boxes) if hasattr(pp_results, 'boxes') else 0}", flush=True)
+             
              if "face" in features and hasattr(pp_results, 'boxes'):
                  for j, bbox_raw in enumerate(pp_results.boxes):
                      
@@ -218,9 +220,12 @@ class SecurityProcessor(BaseProcessor):
                          
                          if should_process:
                              if x2 > x1 and y2 > y1:
+                                 print(f"✂️ DEBUG-FACE-CROP: Creating face crop from person bbox ({x1},{y1},{x2},{y2})", flush=True)
                                  face_crop = frame[y1:y2, x1:x2]
                                  face_crops.append(face_crop)
                                  face_metadata.append((i, tid, abs_box, config_data))
+                             else:
+                                 print(f"⚠️ DEBUG-FACE-CROP: Invalid bbox ({x1},{y1},{x2},{y2}), skipping", flush=True)
                          elif cached_ident:
                              # Add cached result
                              name = cached_ident['name']
@@ -228,10 +233,12 @@ class SecurityProcessor(BaseProcessor):
                              face_results_map[i].append((abs_box, name, color))
 
         # --- 3. Batch Face Recognition ---
+        print(f"👤 DEBUG-FACE-BATCH: Total face_crops to process: {len(face_crops)}", flush=True)
         if face_crops:
             print(f"⚡ DEBUG: Analyzing {len(face_crops)} detected faces...", flush=True)
             # Predict all faces at once
             all_faces_analysis = self.face_model.predict(face_crops)
+            print(f"✅ DEBUG: YuNet returned {len(all_faces_analysis)} results", flush=True)
             
             # Re-map results
             for k, faces in enumerate(all_faces_analysis):

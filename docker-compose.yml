@@ -52,17 +52,19 @@ services:
     environment:
       - MTX_API=yes
       - MTX_APIADDRESS=:9997
+      - MTX_HLS=yes
+      - MTX_HLSADDRESS=:8888
+      - MTX_HLSALWAYSREMUX=yes
       - MTX_WEBRTC=yes
       - MTX_WEBRTCADDRESS=0.0.0.0:8889
       - MTX_READTIMEOUT=40s
       - MTX_WEBRTCADDITIONALHOSTS=127.0.0.1
-      # MTX_WEBRTCICEUDPORTRANGE=8100-8120 (Disabled: Switching to TCP-Only for stability on Windows)
       # Remove conflicting alias
     ports:
       - "8554:8554" # RTSP
       - "1935:1935" # RTMP
-      - "0.0.0.0:8888:8888" # HLS (Explicit IPv4)
-      - "0.0.0.0:8889:8889" # WebRTC (TCP Only)
+      - "8888:8888" # HLS
+      - "8889:8889" # WebRTC (TCP Only)
       # - "8100-8120:8100-8120/udp" # WebRTC ICE/Media (UDP) - Disabled
       - "9997:9997" # API
     networks:
@@ -87,7 +89,7 @@ services:
       - DB_NAME=vigias
       - MEDIAMTX_API=http://mediamtx:9997/v3/config/paths
     ports:
-      - "0.0.0.0:8003:8000" # Expose management API on host 8003 (Explicit IPv4)
+      - "8003:8000" # Expose management API on host 8003
     networks:
       - vision_net
     depends_on:
@@ -95,6 +97,8 @@ services:
         condition: service_started
       redis:
         condition: service_started
+      postgres:
+        condition: service_healthy
     volumes:
       - ./evidence:/app/evidence
     extra_hosts:
@@ -136,7 +140,7 @@ services:
   inference:
     build: ./inference
     image: vigias-inference
-    restart: unless-stopped
+    restart: "no"  # Prevent cascade restarts - GPU issues shouldn't affect other services
     volumes:
       - ./inference:/app/inference
       # Mount cache for models to avoid re-downloading

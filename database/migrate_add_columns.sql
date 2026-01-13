@@ -39,6 +39,19 @@ BEGIN
         ALTER TABLE cameras ADD COLUMN max_reconnects INTEGER DEFAULT 5;
         RAISE NOTICE 'Added max_reconnects column to cameras';
     END IF;
+    
+    -- Add features column if it doesn't exist (for face, lpr, intrusion detection)
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'cameras' AND column_name = 'features') THEN
+        ALTER TABLE cameras ADD COLUMN features JSONB DEFAULT '["face", "lpr", "intrusion", "line_crossing"]'::jsonb;
+        RAISE NOTICE 'Added features column to cameras';
+    END IF;
+    
+    -- Ensure existing cameras have features enabled
+    UPDATE cameras 
+    SET features = '["face", "lpr", "intrusion", "line_crossing"]'::jsonb 
+    WHERE features IS NULL OR features = '{}'::jsonb OR features = '[]'::jsonb;
+    
 END $$;
 
 -- Create camera_reconnection_log table if it doesn't exist

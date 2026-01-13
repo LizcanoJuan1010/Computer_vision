@@ -91,6 +91,8 @@ class LPRModelONNX(BaseModel):
 
                      if self.rec_sess:
                          crop = self._get_rotate_crop_image(frame, np.array(box, dtype=np.float32))
+                         if crop is None:
+                             continue  # Skip this plate if crop failed
                          text, score = self._predict_rec(crop)
                          
                          result.all_texts.append((text, score))
@@ -274,16 +276,61 @@ class LPRModelONNX(BaseModel):
         return np.array(box, dtype=np.float32)
 
     def _get_rotate_crop_image(self, img, points):
-        img_crop_width = int(max(np.linalg.norm(points[0] - points[1]), np.linalg.norm(points[2] - points[3])))
-        img_crop_height = int(max(np.linalg.norm(points[0] - points[3]), np.linalg.norm(points[1] - points[2])))
-        pts_std = np.float32([[0, 0], [img_crop_width, 0], [img_crop_width, img_crop_height], [0, img_crop_height]])
-        M = cv2.getPerspectiveTransform(points, pts_std)
-        dst_img = cv2.warpPerspective(img, M, (img_crop_width, img_crop_height), borderMode=cv2.BORDER_REPLICATE)
-        
-        # If vertical text?
-        if float(dst_img.shape[0]) / float(dst_img.shape[1]) > 1.5:
-             dst_img = np.rot90(dst_img)
-        return dst_img
+        """
+        Rotate and crop image based on polygon points.
+        Points must be 4 corners in order: top-left, top-right, bottom-right, bottom-left
+        """
+        try:
+            # Ensure points is a numpy array with correct shape
+            points = np.array(points, dtype=np.float32)
+            
+            # Validate we have exactly 4 points
+            if points.shape != (4, 2):
+                print(f"⚠️ LPR: Invalid points shape {points.shape}, expected (4, 2)", flush=True)
+                # Try to get bounding rect instead
+                if len(points) >= 4:
+                    points = points[:4].reshape(4, 2)
+                else:
+                    return None
+            
+            # Check for degenerate polygons (zero area)
+            width1 = np.linalg.norm(points[0] - points[1])
+            width2 = np.linalg.norm(points[2] - points[3])
+            height1 = np.linalg.norm(points[0] - points[3])
+            height2 = np.linalg.norm(points[1] - points[2])
+            
+            img_crop_width = int(max(width1, width2))
+            img_crop_height = int(max(height1, height2))
+            
+            # Ensure minimum dimensions
+            if img_crop_width < 2 or img_crop_height < 2:
+                print(f"⚠️ LPR: Crop too small ({img_crop_width}x{img_crop_height}), skipping", flush=True)
+                return None
+            
+            # Build destination points
+            pts_std = np.float32([
+                [0, 0], 
+                [img_crop_width, 0], 
+                [img_crop_width, img_crop_height], 
+                [0, img_crop_height]
+            ])
+            
+            # Ensure points are contiguous float32 array
+            points = np.ascontiguousarray(points, dtype=np.float32)
+            pts_std = np.ascontiguousarray(pts_std, dtype=np.float32)
+            
+            M = cv2.getPerspectiveTransform(points, pts_std)
+            dst_img = cv2.warpPerspective(img, M, (img_crop_width, img_crop_height), borderMode=cv2.BORDER_REPLICATE)
+            
+            # If vertical text, rotate
+            if dst_img.shape[1] > 0 and float(dst_img.shape[0]) / float(dst_img.shape[1]) > 1.5:
+                dst_img = np.rot90(dst_img)
+            
+            return dst_img
+            
+        except Exception as e:
+            print(f"⚠️ LPR: Crop error: {e}", flush=True)
+            return None
 
     # --- Internal Methods (Recognition) ---
     def _predict_rec(self, img_crop):

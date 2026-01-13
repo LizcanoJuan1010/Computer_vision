@@ -69,46 +69,38 @@ class YuNetONNX:
         Returns: (1, faces) where faces is [N, 15]
         Format: x1, y1, w, h, x_re, y_re, ... (5 landmarks), score
         """
-        h, w, _ = img.shape
+        orig_h, orig_w = img.shape[:2]
         
-        # 1. Resize/Pad
-        # YuNet expects the set input size. We assume img matches self.input_size or we resize?
-        # cv2.FaceDetectorYN usually handles resizing internally if input size is set?
-        # Actually cv2 impl requires us to resize manually or SetInputSize matches image.
-        # Here we assume setInputSize was called with (w, h).
+        # CRITICAL FIX: YuNet ONNX model expects FIXED input size
+        # The yunet.onnx model was compiled for 640x640 input
+        target_w, target_h = 640, 640  # Model expected size
         
-        # If setInputSize was called with something else, we might need to verify.
-        # For simplicity, let's assume the caller ensures consistency or we check.
+        # Resize image to fixed size for inference
+        resized_img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
         
-        if self.input_size != (w, h):
-            # Update priors input changed (dynamic reshape support)
-            self.setInputSize((w, h))
-
-        if self.priors is None or self._input_h != h or self._input_w != w:
-             self._input_h, self._input_w = h, w
-             self.priors = self._generate_priors(h, w)
+        # Update input size and priors for the RESIZED image
+        if self.input_size != (target_w, target_h):
+            self.setInputSize((target_w, target_h))
+        
+        if self.priors is None or self._input_h != target_h or self._input_w != target_w:
+             self._input_h, self._input_w = target_h, target_w
+             self.priors = self._generate_priors(target_h, target_w)
 
         # 2. Preprocess
         # BGR, HWC -> 1, 3, H, W
-        blob = cv2.dnn.blobFromImage(img, 1.0, (w, h), (0, 0, 0), swapRB=False, crop=False)
+        blob = cv2.dnn.blobFromImage(resized_img, 1.0, (target_w, target_h), (0, 0, 0), swapRB=False, crop=False)
         
         # 3. Inference
-        outputs = self.session.run(self.output_names, {self.input_name: blob})
+        try:
+            outputs = self.session.run(self.output_names, {self.input_name: blob})
+        except Exception as e:
+            print(f"YuNet ONNX Inference Error: {e}")
+            return 1, None
         
         # outputs usually:
         # [0]: loc  [1, N, 14]  (cx, cy, w, h, 5 landmarks (x,y))
         # [1]: conf [1, N, 2]   (background, face)
         # [2]: iou  [1, N, 1]   (iou score)
-        
-        # Check shapes
-        # Some versions might concat. Let's assume standard 3 headers or 1.
-        # If output len is 1, it might be pre-decoded? No, ONNX usually raw.
-        # But YuNet ONNX from Zoo usually has 3 outputs.
-        
-        # Let's handle logical outputs by checking shapes
-        # loc: shape[-1] == 14
-        # conf: shape[-1] == 2
-        # iou: shape[-1] == 1
         
         loc, conf, iou = None, None, None
         for o in outputs:
@@ -117,10 +109,6 @@ class YuNetONNX:
             elif o.shape[-1] == 1: iou = o
             
         if loc is None or conf is None:
-            # Maybe concatenated? 
-            if len(outputs) == 1:
-                # [1, N, 17]?
-                pass
             print("❌ YuNet Output shapes mismatch expectations.")
             return 0, None
 
@@ -134,8 +122,6 @@ class YuNetONNX:
         cls_scores = conf[:, 1]
         iou_scores = iou[:, 0]
         
-        # Final post-processing logic from YuNet paper/impl:
-        # score = sqrt(cls_score * iou_score) ?? Or just cls?
         # OpenCV impl: scores = conf[:, 1]
         
         scores = cls_scores
@@ -184,31 +170,52 @@ class YuNetONNX:
         # cv2.dnn.NMSBoxes expects [x, y, w, h]
         
         bboxes = bbox.tolist()
-        scores_list = scores_v.tolist()
-        
-        indices = cv2.dnn.NMSBoxes(bboxes, scores_list, self.conf_threshold, self.nms_threshold, top_k=self.top_k)
+        scores_list = scores_v.tolist()        
+        # NMS
+        indices = cv2.dnn.NMSBoxes(bboxes, scores_list, self.conf_threshold, self.nms_threshold)
         
         if len(indices) == 0:
-             return 0, None
-             
+            return 1, None
+        
         indices = np.array(indices).flatten()
         
-        # Assemble Final Output
-        # [x, y, w, h, l1x, l1y, ... l5y, score] (15 dims)
-        
+        # Build final output [N, 15]
+        # Format: x1, y1, w, h, kp1_x, kp1_y, ..., kp5_x, kp5_y, score
         final_faces = []
-        for idx in indices:
-            row = []
-            # Box
-            row.extend(bbox[idx])
-            # Landmarks
-            row.extend(landmarks[idx])
-            # Score
-            row.append(scores_v[idx])
-            
-            final_faces.append(row)
-            
-        final_faces = np.array(final_faces, dtype=np.float32)
         
-        return 1, final_faces
-
+        # CRITICAL: Scale factors to convert from resized (640x640) back to original dimensions
+        scale_x = orig_w / target_w
+        scale_y = orig_h / target_h
+        
+        for idx in indices:
+            # x1, y1, w, h
+            x1, y1, w_box, h_box = bbox[idx]
+            score_val = scores_v[idx]
+            
+            # Scale bbox back to original size
+            x1_orig = x1 * scale_x
+            y1_orig = y1 * scale_y
+            w_orig = w_box * scale_x
+            h_orig = h_box * scale_y
+            
+            # Landmarks (5 keypoints = 10 values)
+            kps_resized = landmarks[idx].reshape(5, 2) # shape (5, 2)
+            
+            # Scale landmarks back to original size
+            kps_orig = kps_resized.copy()
+            kps_orig[:, 0] *= scale_x  # x coords
+            kps_orig[:, 1] *= scale_y  # y coords
+            
+            # Flatten landmarks
+            kps_flat = kps_orig.flatten() # [kp1_x, kp1_y, ..., kp5_x, kp5_y]
+            
+            # Build row: [x1, y1, w, h, kp1_x, kp1_y, ..., kp5_x, kp5_y, score]
+            row = np.concatenate([[x1_orig, y1_orig, w_orig, h_orig], kps_flat, [score_val]])
+            final_faces.append(row)
+        
+        if len(final_faces) == 0:
+            return 1, None
+        
+        final_array = np.array(final_faces, dtype=np.float32)
+        
+        return 1, final_array

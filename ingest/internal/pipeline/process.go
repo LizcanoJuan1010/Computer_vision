@@ -23,11 +23,11 @@ type Message struct {
 	Config    config.CameraConfig
 }
 
-func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame, out chan<- Message) {
+func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame, out chan<- Message, publisher *RTSPPublisher) {
 	defer close(out)
 
 	imgResized := gocv.NewMat()
-	defer imgResized.Close()
+	// defer imgResized.Close() -- MANUALLY MANAGED to avoid Double Free on re-allocation
 
 	// MOG2 Background Subtractor - Optimized: detectShadows=false
 	mog2 := gocv.NewBackgroundSubtractorMOG2WithParams(500, 16, false)
@@ -72,7 +72,13 @@ func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame,
 		origRows, origCols := frame.Mat.Rows(), frame.Mat.Cols()
 		origH, origW := float64(origRows), float64(origCols)
 		
-		scale := min(targetH/origH, targetW/origW)
+		scaleH := targetH / origH
+		scaleW := targetW / origW
+		scale := scaleH
+		if scaleW < scaleH {
+			scale = scaleW
+		}
+
 		nw, nh := int(origW*scale), int(origH*scale)
 		
 		// Resize original to new scaled dimensions
@@ -85,16 +91,46 @@ func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame,
 		// Reset canvas to grey (128)
 		imgResized.SetTo(gocv.NewScalar(128, 128, 128, 0))
 		
-		// Make sure imgResized is the correct size first (it should be initialized once or reused)
+		// Make sure imgResized is the correct size first
+		if imgResized.Empty() || imgResized.Cols() != resizeWidth || imgResized.Rows() != resizeHeight {
+			// Don't close here if it was deferred!
+			// Actually, improved pattern:
+			// Just verify size. If wrong, re-allocate.
+			// Ideally we shouldn't re-allocate in a hot loop if possible, but resizing demands it.
+			
+			// If we re-allocate, we must be careful about the deferred Close.
+			// The clean way is:
+			// 1. Don't use defer for imgResized if we swap it.
+			// 2. Or assume it stays valid.
+			
+			// Fix: Resize in place if possible? gocv.Resize can destination to existing mat.
+			// But we are doing 'canvas' logic.
+			
+			// Safest fix for stability:
+			// Use a separate 'canvas' mat for the resizing work, close it every loop?
+			// No, that churns memory.
+			
+			// Better: Reuse the *same* Mat instance if possible?
+			// gocv.NewMatWithSize allocates new C++ memory.
+			
+			// Correct fix:
+			// imgResized.Close() // Close old one
+			// imgResized = gocv.NewMatWithSize(...)
+			// But we have a 'defer' pending on the *old* object.
+			
+			// SOLUTION: Move imgResized scope INSIDE the loop, OR manage it manually without defer at function level.
+		}
+		
+		// Actually, let's just re-create it locally if needed, but we want to reuse it.
+		// Let's use `EnsureMat` logic manually.
 		if imgResized.Cols() != resizeWidth || imgResized.Rows() != resizeHeight {
-			// Re-allocate if size changed (or first run)
-			imgResized.Close()
-			imgResized = gocv.NewMatWithSize(resizeHeight, resizeWidth, gocv.MatTypeCV8UC3)
-			imgResized.SetTo(gocv.NewScalar(128, 128, 128, 0))
-		} else {
-             // Just clear it
-             imgResized.SetTo(gocv.NewScalar(128, 128, 128, 0))
-        }
+             // If we change it, we must ensure the old one is closed (done by previous loop end? no)
+             // We can't change the underlying pointer of a deferred variable safely.
+             // So, we will REMOVE the top-level defer and manage it manually.
+             imgResized.Close()
+             imgResized = gocv.NewMatWithSize(resizeHeight, resizeWidth, gocv.MatTypeCV8UC3)
+		}
+		imgResized.SetTo(gocv.NewScalar(128, 128, 128, 0))
 		
 		// Paste scaled image into center
 		top := (int(targetH) - nh) / 2
@@ -111,6 +147,16 @@ func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame,
 		// Update FrameHub for Streaming/Snapshots
 		// We use imgResized (which is the standardized size)
 		Hub.UpdateFrame(cam.ID, imgResized)
+
+		// 🔴 PUSH TO MEDIAMTX (RTSP)
+		// Doing this BEFORE Motion Gating ensures continuous stream
+		if publisher != nil {
+			if err := publisher.WriteFrame(imgResized); err != nil {
+				// Don't log every frame error to avoid spam, but maybe rate limit log?
+				// For now, minimal logging or debug
+				// log.Printf("Error pushing frame: %v", err)
+			}
+		}
 
 		// 2. Motion Gating (MOG2)
 		mog2.Apply(imgResized, &fgMask)
@@ -213,6 +259,7 @@ func ProcessWorker(cam config.CameraConfig, cfg *config.Config, in <-chan Frame,
 
 		frame.Mat.Close() // Close original capture frame
 	}
+	imgResized.Close() // Manual cleanup
 }
 
 func sendFrame(cam config.CameraConfig, mat gocv.Mat, ts time.Time, out chan<- Message) {

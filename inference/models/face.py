@@ -4,6 +4,7 @@ import onnxruntime as ort
 import os
 from ..config import config
 from .base import BaseModel
+from .yunet_onnx import YuNetONNX
 
 class FaceResult:
     def __init__(self, bbox, kps, det_score, embedding):
@@ -68,17 +69,16 @@ class FaceModel(BaseModel):
             print(f"WARNING: Face recognition model not found at {self.rec_model_path}")
 
         try:
-            # 1. Initialize YuNet Detector
-            self.detector = cv2.FaceDetectorYN.create(
-                model=self.det_model_path,
-                config="",
+            # 1. Initialize YuNet Detector (ONNX Runtime)
+            print("DEBUG: Initializing YuNet via ONNXRuntime (GPU/TensorRT)...")
+            self.detector = YuNetONNX(
+                model_path=self.det_model_path,
                 input_size=self.input_size,
-                score_threshold=config.FACE_DET_SCORE_THRESHOLD,
+                conf_threshold=config.FACE_DET_SCORE_THRESHOLD,
                 nms_threshold=config.FACE_DET_NMS_THRESHOLD,
-                top_k=config.FACE_DET_TOP_K,
-                backend_id=cv2.dnn.DNN_BACKEND_DEFAULT,
-                target_id=cv2.dnn.DNN_TARGET_CPU 
+                top_k=config.FACE_DET_TOP_K
             )
+            print("DEBUG: YuNet Instantiated.")
 
             # 2. Initialize GhostFaceNetV2 Recognizer (ONNX Runtime)
             providers = ['CPUExecutionProvider']
@@ -162,7 +162,12 @@ class FaceModel(BaseModel):
             if not frame.flags['C_CONTIGUOUS']:
                 frame = np.ascontiguousarray(frame)
                 
-            _, faces = self.detector.detect(frame)
+            faces = None
+            try:
+                _, faces = self.detector.detect(frame)
+            except Exception as e:
+                print(f"Error in YuNet Detection: {e}")
+                faces = None
             
             if faces is not None:
                 for face_data in faces:

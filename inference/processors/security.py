@@ -19,7 +19,7 @@ class SecurityProcessor(BaseProcessor):
         self.spatial = SpatialAnalytics()
 
         self.frame_counter = 0
-        self.SKIP_FACTOR = 3 # Run Face/LPR every 5th frame
+        self.SKIP_FACTOR = 2  # Reduced to 2 for smoother updates (latency optimization)
         self.track_state = {} # Cache: {track_id: {'name': str, 'color': tuple, 'last_check': float}}
 
 
@@ -94,16 +94,12 @@ class SecurityProcessor(BaseProcessor):
         start_time = time.time()
         
         # --- 1. PP-Human Inference (Batch) ---
-        # --- 1. PP-Human Inference (Sequential to avoid MOT batch crash) ---
-        # Run Detection/Tracking/Action on every frame individually
-        # predict() returns a list [PPHumanResult], so we take [0]
-        
         # GPU Optimization: Use GPU frames if available
-        # True Batching with Per-Camera Tracking
+        # Pass camera configs so Pose only runs for cameras with action features
         if gpu_frames is not None:
-             pp_results_batch = self.yolo_model.predict(gpu_frames, camera_ids=camera_ids)
+             pp_results_batch = self.yolo_model.predict(gpu_frames, camera_ids=camera_ids, camera_configs=configs)
         else:
-             pp_results_batch = self.yolo_model.predict(frames, camera_ids=camera_ids)
+             pp_results_batch = self.yolo_model.predict(frames, camera_ids=camera_ids, camera_configs=configs)
         
         # DEBUG: Print detection stats
         for i, res in enumerate(pp_results_batch):
@@ -644,8 +640,9 @@ class SecurityProcessor(BaseProcessor):
             if "face" in features:
                 faces_data = face_results_map[i]
                 for (bbox, name, color) in faces_data:
-                     # bbox is absolute (x1, y1, x2, y2) in TARGET_SIZE scale
-                     nx1, ny1, nx2, ny2 = bbox[0]/t_w, bbox[1]/t_h, bbox[2]/t_w, bbox[3]/t_h
+                     # bbox is absolute (x1, y1, x2, y2) relative to ORIGINAL FRAME
+                     h_orig, w_orig = frames[i].shape[:2]
+                     nx1, ny1, nx2, ny2 = bbox[0]/w_orig, bbox[1]/h_orig, bbox[2]/w_orig, bbox[3]/h_orig
                      frame_meta["faces"].append({
                          "bbox": [nx1, ny1, nx2, ny2], 
                          "name": name
@@ -722,18 +719,24 @@ class SecurityProcessor(BaseProcessor):
                              elif cls_id == 5: label = "Bus"
                              elif cls_id == 3: label = "Moto"
                             
-                             # Run LPR (ONNX)
+                             # Run LPR (ONNX) - Use ORIGINAL frame (higher res) for better OCR
                              plate_text = None
                              if self.lpr_model and "lpr" in features:
                                  try:
-                                     # Crop Vehicle
-                                     original = frame
-                                     vh, vw = original.shape[:2]
-                                     vx1 = max(0, min(bx1, vw)); vy1 = max(0, min(by1, vh))
-                                     vx2 = max(0, min(bx2, vw)); vy2 = max(0, min(by2, vh))
+                                     # Optimization 7: Use original frame, not resized
+                                     # bx1,by1,bx2,by2 are in TARGET_SIZE coords, scale to original
+                                     vh, vw = orig_h, orig_w
+                                     # Scale from TARGET_SIZE to original frame size
+                                     scale_x_inv = orig_w / t_w
+                                     scale_y_inv = orig_h / t_h
                                      
-                                     if (vx2 - vx1) > 20 and (vy2 - vy1) > 20:
-                                         vehicle_crop = original[int(vy1):int(vy2), int(vx1):int(vx2)]
+                                     vx1 = int(max(0, min(bx1 * scale_x_inv, vw)))
+                                     vy1 = int(max(0, min(by1 * scale_y_inv, vh)))
+                                     vx2 = int(max(0, min(bx2 * scale_x_inv, vw)))
+                                     vy2 = int(max(0, min(by2 * scale_y_inv, vh)))
+                                     
+                                     if (vx2 - vx1) > 50 and (vy2 - vy1) > 50:  # Min 50px for LPR
+                                         vehicle_crop = frame[vy1:vy2, vx1:vx2]  # Use original frame
                                          # Predict
                                          lpr_result = self.lpr_model.predict(vehicle_crop)
                                          if lpr_result.label:

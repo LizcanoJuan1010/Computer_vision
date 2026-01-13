@@ -10,6 +10,7 @@ import asyncio
 
 @router.websocket("/{camera_id}")
 async def debug_websocket(websocket: WebSocket, camera_id: str):
+    print(f"DEBUG: Handling WS request for {camera_id}", flush=True)
     await websocket.accept()
     logger.info(f"Debug WS connected for {camera_id}")
     

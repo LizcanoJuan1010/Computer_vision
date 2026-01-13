@@ -61,7 +61,7 @@ class RTDETRModel:
 
     def predict(self, frame):
         """
-        Run inference
+        Run inference on a single frame
         Returns: boxes (xyxy), scores, class_ids
         """
         if self.session is None:
@@ -71,25 +71,57 @@ class RTDETRModel:
         blob, (orig_h, orig_w) = self.preprocess(frame)
         
         # Inference
-        # RT-DETR outputs: [1, 300, 4] (boxes) and [1, 300, 80] (scores) usually, OR post-processed
-        # Let's handle generic ONNX output
         outputs = self.session.run(None, {self.input_name: blob})
         
-        # Note: raw RT-DETR ONNX (from Paddle) usually exports with post-processing included
-        # Output 0: boxes, Output 1: scores (sometimes concatenated)
-        
-        # Parse based on expected structure (simplifying for common RT-DETR export)
-        # Assuming output is standard [1, N, 6] (x, y, x, y, score, cls) OR separated
-        
-        # Fallback parsing logic (to be adjusted based on actual ONNX signature):
-        # We'll print shape on first run if debugging needed, but for now assuming standard Paddle export
-        # usually gives 'reshape2_83.tmp_0' (boxes), 'tile_3.tmp_0' (scores) etc.
-        # But lyuwenyu/RT-DETR exports might be clean.
-        
-        # Let's inspect output shapes dynamically
-        # Common format for end-to-end DETR: [1, 300, 6] -> xyxy, score, cls
-        
         return self._postprocess(outputs, (orig_h, orig_w))
+
+    def predict_batch(self, frames):
+        """
+        Run inference on a batch of frames in a single GPU call.
+        Optimization 5: True GPU batching for significant performance improvement.
+        
+        Args:
+            frames: List of numpy arrays (images)
+            
+        Returns:
+            List of (boxes, scores, class_ids) tuples, one per frame
+        """
+        if self.session is None or not frames:
+            return [([], [], []) for _ in frames] if frames else []
+        
+        # Preprocess all frames into a batch
+        batch_blobs = []
+        orig_shapes = []
+        
+        for frame in frames:
+            blob, orig_shape = self.preprocess(frame)
+            batch_blobs.append(blob[0])  # Remove batch dim (1, 3, H, W) -> (3, H, W)
+            orig_shapes.append(orig_shape)
+        
+        # Stack into batch [N, 3, H, W]
+        batch_input = np.stack(batch_blobs, axis=0)
+        
+        # Single inference call for entire batch
+        try:
+            outputs = self.session.run(None, {self.input_name: batch_input})
+        except Exception as e:
+            print(f"⚠️ Batch inference failed, falling back to sequential: {e}", flush=True)
+            # Fallback to sequential processing
+            return [self.predict(frame) for frame in frames]
+        
+        # Postprocess each result
+        results = []
+        for i in range(len(frames)):
+            try:
+                # Extract output for this frame from batch
+                frame_outputs = [out[i:i+1] for out in outputs]
+                boxes, scores, cls_ids = self._postprocess(frame_outputs, orig_shapes[i])
+                results.append((boxes, scores, cls_ids))
+            except Exception as e:
+                print(f"⚠️ Postprocess error for frame {i}: {e}", flush=True)
+                results.append(([], [], []))
+        
+        return results
 
     def _postprocess(self, outputs, orig_shape):
         orig_h, orig_w = orig_shape

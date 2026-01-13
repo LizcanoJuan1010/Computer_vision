@@ -71,10 +71,13 @@ class PPHumanModel:
             import traceback
             traceback.print_exc()
 
-    def predict(self, frame_or_batch, camera_ids=None):
+    def predict(self, frame_or_batch, camera_ids=None, camera_configs=None):
         """
         Run detection on a batch of frames
         Returns: List[PPHumanResult] (one per frame)
+        
+        Args:
+            camera_configs: List of config dicts per camera. Used to check if pose is needed.
         """
         frames = frame_or_batch if isinstance(frame_or_batch, list) else [frame_or_batch]
         
@@ -87,25 +90,31 @@ class PPHumanModel:
                 cam_ids_list = [camera_ids] * len(frames)
         else:
             cam_ids_list = ["cam_0"] * len(frames)
+        
+        # Handle camera_configs
+        configs_list = camera_configs if camera_configs else [{}] * len(frames)
             
         results_list = []
         
         try:
-            for i, frame in enumerate(frames):
+            # Optimization 5: Batch detection - single GPU call for all frames
+            all_detections = self.det_model.predict_batch(frames)
+            
+            for i, (boxes, scores, classes) in enumerate(all_detections):
                 cam_id = cam_ids_list[i] if i < len(cam_ids_list) else "unknown"
-                print(f"🕵️ PP-Human Processing Frame {i} [Cam {cam_id}] Shape: {frame.shape}", flush=True)
-                result = PPHumanResult()
+                config = configs_list[i] if i < len(configs_list) else {}
+                frame = frames[i]
                 
-                # 1. Detection (RT-DETR ONNX)
-                # Ensure predict handles single frame
-                boxes, scores, classes = self.det_model.predict(frame)
+                print(f"🕵️ PP-Human Frame {i} [Cam {cam_id}] Shape: {frame.shape} Dets: {len(boxes)}", flush=True)
+                result = PPHumanResult()
                 
                 person_boxes = []
                 
                 # Filter and Assign Tracks
                 for k, (box, score, cls_id) in enumerate(zip(boxes, scores, classes)):
                     cls_id = int(cls_id)
-                    print(f"Raw Det [{cam_id}]: cls={cls_id} score={score:.4f}", flush=True) # DEBUG
+                    # DEBUG: Skip verbose logging for performance
+                    # print(f"Raw Det [{cam_id}]: cls={cls_id} score={score:.4f}", flush=True)
                     
                     # Allow Person (0) and Vehicles (2=Car, 3=Moto, 5=Bus, 7=Truck)
                     if (cls_id == 0 or cls_id in [2, 3, 5, 7]) and score > self.conf_threshold:
@@ -123,14 +132,14 @@ class PPHumanModel:
                 
                 results_list.append(result)
 
-                # 2. Pose Estimation (Per Frame)
-                if person_boxes and self.pose_model:
-                     # Adapted to existing pose logic (expects lists)
+                # 2. Pose Estimation - ONLY run if camera has action features enabled
+                features = config.get("features", []) if config else []
+                needs_pose = any(f in features for f in ["fight_detection", "fall_detection"])
+                
+                if needs_pose and person_boxes and self.pose_model:
                      try:
                         pose_results = self.pose_model.predict([frame], [person_boxes])
-                        # Assuming pose_results corresponds to person_boxes
-                        # We don't store keypoints in result yet?
-                        pass
+                        result.keypoints = pose_results[0] if pose_results else []
                      except Exception as pe:
                         print(f"Pose Error: {pe}", flush=True)
 

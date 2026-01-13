@@ -125,9 +125,25 @@ CREATE Table IF NOT EXISTS cameras (
     geo_location POINT,
     meta_info JSONB DEFAULT '{}'::jsonb, 
     is_active BOOLEAN DEFAULT TRUE,
+    -- Added columns for Ingest service compatibility
+    priority INTEGER DEFAULT 0,
+    status VARCHAR(50) DEFAULT 'UNKNOWN',
+    last_seen_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+-- Camera reconnection log for tracking connection attempts
+CREATE TABLE IF NOT EXISTS camera_reconnection_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    camera_id UUID REFERENCES cameras(id) ON DELETE CASCADE,
+    attempt_number INTEGER DEFAULT 1,
+    success BOOLEAN DEFAULT FALSE,
+    error_message TEXT,
+    reconnected_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_camera_reconnection_camera ON camera_reconnection_log(camera_id);
 
 -- =======================================================
 -- 4. CEREBRO DE LA IA (CONFIGURACIÓN DE REGLAS)

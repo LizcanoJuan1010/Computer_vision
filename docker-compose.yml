@@ -5,15 +5,22 @@ networks:
 services:
   nats:
     image: nats:latest
+    restart: unless-stopped
     command: "-js"
     ports:
       - "4223:4222"
       - "8223:8222"
     networks:
       - vision_net
+    healthcheck:
+      test: [ "CMD", "nats-server", "-v" ] # Simple check if binary runs, or ping port
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   postgres:
     image: pgvector/pgvector:pg16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: user
       POSTGRES_PASSWORD: password
@@ -33,14 +40,38 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
       - "6380:6379"
+    networks:
+      - vision_net
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    environment:
+      - MTX_API=yes
+      - MTX_APIADDRESS=:9997
+      - MTX_WEBRTC=yes
+      - MTX_WEBRTCADDRESS=0.0.0.0:8889
+      - MTX_READTIMEOUT=40s
+      - MTX_WEBRTCADDITIONALHOSTS=127.0.0.1
+      # MTX_WEBRTCICEUDPORTRANGE=8100-8120 (Disabled: Switching to TCP-Only for stability on Windows)
+      # Remove conflicting alias
+    ports:
+      - "8554:8554" # RTSP
+      - "1935:1935" # RTMP
+      - "0.0.0.0:8888:8888" # HLS (Explicit IPv4)
+      - "0.0.0.0:8889:8889" # WebRTC (TCP Only)
+      # - "8100-8120:8100-8120/udp" # WebRTC ICE/Media (UDP) - Disabled
+      - "9997:9997" # API
     networks:
       - vision_net
 
   router:
     build: ./router
     image: vigias-router
+    restart: unless-stopped
     environment:
       - NATS_URL=nats://nats:4222
       - REDIS_HOST=redis
@@ -54,13 +85,16 @@ services:
       - PORT_RTSP=${PORT_RTSP}
       - DB_PASSWORD=password
       - DB_NAME=vigias
+      - MEDIAMTX_API=http://mediamtx:9997/v3/config/paths
     ports:
-      - "8003:8000" # Expose management API on host 8003
+      - "0.0.0.0:8003:8000" # Expose management API on host 8003 (Explicit IPv4)
     networks:
       - vision_net
     depends_on:
-      - nats
-      - redis
+      nats:
+        condition: service_started
+      redis:
+        condition: service_started
     volumes:
       - ./evidence:/app/evidence
     extra_hosts:
@@ -69,6 +103,7 @@ services:
   ingest:
     build: ./ingest
     image: vigias-ingest
+    restart: unless-stopped
     environment:
       - NATS_URL=nats://nats:4222
       # Database Config
@@ -87,7 +122,7 @@ services:
       - RESIZE_WIDTH=1280
       - RESIZE_HEIGHT=720
       - TARGET_FPS=30.0
-      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
+      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-udp}
     ports:
       - "8088:8080" # Metrics port
     networks:
@@ -101,6 +136,7 @@ services:
   inference:
     build: ./inference
     image: vigias-inference
+    restart: unless-stopped
     volumes:
       - ./inference:/app/inference
       # Mount cache for models to avoid re-downloading
@@ -147,8 +183,8 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
+              count: all
+              capabilities: [gpu]
     networks:
       - vision_net
     depends_on:
@@ -158,6 +194,7 @@ services:
 
   prometheus:
     image: prom/prometheus:latest
+    restart: unless-stopped
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     ports:

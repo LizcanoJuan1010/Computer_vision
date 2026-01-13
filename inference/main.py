@@ -177,24 +177,29 @@ async def run():
 
     try:
         # 3. LPR Model (ONNX - Stable)
-        print("Loading LPR Model (ONNX)...")
+        print("DEBUG: Loading LPR Model (ONNX)...")
         lpr_model = LPRModelONNX()
         lpr_model.load()
+        print("DEBUG: LPR Model Loaded.")
         # lpr_model = None
 
-        print("Loading PP-Human Model...")
+        print("DEBUG: Loading PP-Human Model...")
         pp_human_model = PPHumanModel()
         pp_human_model.load()
+        print("DEBUG: PP-Human Model Loaded.")
         
-        print("Loading Face Model...")
+        print("DEBUG: Loading Face Model...")
         face_model = FaceModel()
+        print("DEBUG: FaceModel Instantiated.")
         face_model.load()
+        print("DEBUG: Face Model Loaded.")
         
         # 3.5 Vehicle Model (Wraps LPR)
-        print("Loading PP-Vehicle Model...")
+        print("DEBUG: Loading PP-Vehicle Model...")
         pp_vehicle_weights = config.PPHUMAN_DET_MODEL_DIR  # RT-DETR shared model
         vehicle_model = PPVehicleModel(model_dir=pp_vehicle_weights, lpr_model=lpr_model)
         vehicle_model.load()
+        print("DEBUG: PP-Vehicle Model Loaded.")
         # vehicle_model = None
 
     except Exception as e:

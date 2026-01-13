@@ -119,8 +119,9 @@ func CaptureWorker(cam config.CameraConfig, cfg *config.Config, out chan<- Frame
 		}
 
 		// Try to set frame width/height to force codec initialization
-		webcam.Set(gocv.VideoCaptureFrameWidth, 1920)
-		webcam.Set(gocv.VideoCaptureFrameHeight, 1080)
+		// Removing hardcoded 1080p to allow auto-negotiation or Env var control if needed
+		// webcam.Set(gocv.VideoCaptureFrameWidth, 1920)
+		// webcam.Set(gocv.VideoCaptureFrameHeight, 1080)
 
 		// Connection successful!
 		streamMgr.OnConnectionSuccess()

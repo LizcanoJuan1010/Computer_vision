@@ -19,7 +19,7 @@ RUN go build -o ingest_server cmd/server/main.go
 FROM ghcr.io/hybridgroup/opencv:4.8.1
 
 # Install curl and yt-dlp (standalone binary)
-RUN apt-get update && apt-get install -y curl && \
+RUN apt-get update && apt-get install -y curl ffmpeg && \
     curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /usr/local/bin/yt-dlp && \
     chmod a+rx /usr/local/bin/yt-dlp
 

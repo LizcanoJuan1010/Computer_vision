@@ -25,6 +25,7 @@ type CameraInstance struct {
 	Config     config.CameraConfig
 	CancelFunc context.CancelFunc
 	IsRunning  bool
+	Publisher  *RTSPPublisher
 }
 
 // NewCameraManager creates a new camera manager
@@ -55,6 +56,13 @@ func (cm *CameraManager) StartCamera(cam config.CameraConfig) error {
 	// Create channels
 	captureChan := make(chan Frame, cm.cfg.BufferSize)
 	processChan := make(chan Message, cm.cfg.BufferSize)
+	
+	// Create and Start RTSP Publisher
+	publisher := NewRTSPPublisher(cam.ID)
+	// We handle errors but try not to block start if ffmpeg fails (optional, but good for robustness)
+	if err := publisher.Start(); err != nil {
+		log.Printf("[CameraManager] ⚠️ Failed to start RTSP Publisher for %s: %v", cam.Name, err)
+	}
 
 	// Start workers
 	go func() {
@@ -71,7 +79,8 @@ func (cm *CameraManager) StartCamera(cam config.CameraConfig) error {
 			close(processChan)
 			log.Printf("[CameraManager] Process worker stopped for %s", cam.Name)
 		}()
-		ProcessWorker(cam, cm.cfg, captureChan, processChan)
+		// NOW PASSING PUBLISHER
+		ProcessWorker(cam, cm.cfg, captureChan, processChan, publisher)
 	}()
 
 	go func() {
@@ -84,6 +93,7 @@ func (cm *CameraManager) StartCamera(cam config.CameraConfig) error {
 		Config:     cam,
 		CancelFunc: cancel,
 		IsRunning:  true,
+		Publisher:  publisher,
 	}
 	cm.cancelFuncs[cam.ID] = cancel
 
@@ -105,6 +115,11 @@ func (cm *CameraManager) StopCamera(cameraID string) error {
 	if !instance.IsRunning {
 		log.Printf("[CameraManager] Camera %s is already stopped", instance.Config.Name)
 		return nil
+	}
+	
+	// Stop Publisher
+	if instance.Publisher != nil {
+		instance.Publisher.Stop()
 	}
 
 	// Cancel context to stop workers

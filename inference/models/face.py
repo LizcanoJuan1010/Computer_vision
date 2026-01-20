@@ -70,7 +70,7 @@ class FaceModel(BaseModel):
 
         try:
             # 1. Initialize YuNet Detector (ONNX Runtime)
-            print("DEBUG: Initializing YuNet via ONNXRuntime (GPU/TensorRT)...")
+            print("🔍 Initializing YuNet Face Detector...")
             self.detector = YuNetONNX(
                 model_path=self.det_model_path,
                 input_size=self.input_size,
@@ -78,19 +78,44 @@ class FaceModel(BaseModel):
                 nms_threshold=config.FACE_DET_NMS_THRESHOLD,
                 top_k=config.FACE_DET_TOP_K
             )
-            print("DEBUG: YuNet Instantiated.")
+            print("✅ YuNet Face Detector initialized.")
 
             # 2. Initialize GhostFaceNetV2 Recognizer (ONNX Runtime)
-            providers = ['CPUExecutionProvider']
-            if config.USE_TENSORRT:
-                providers.insert(0, 'CUDAExecutionProvider') 
-
-            self.recognizer = ort.InferenceSession(self.rec_model_path, providers=providers)
+            if not os.path.exists(self.rec_model_path):
+                print(f"⚠️ GhostFaceNetV2 NOT FOUND at {self.rec_model_path}")
+                print("   Face detection will work, but recognition will be disabled.")
+                self.recognizer = None
+            else:
+                # ONNX Optimization for GhostFaceNetV2
+                # Optimized ONNX session
+                sess_options = ort.SessionOptions()
+                sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+                sess_options.enable_mem_pattern = False
+                sess_options.enable_cpu_mem_arena = True
+                sess_options.intra_op_num_threads = 2  # Reduce CPU usage
+                sess_options.inter_op_num_threads = 1  # Reduce CPU usage
+                
+                providers = [
+                    ('CUDAExecutionProvider', {
+                        'device_id': 0,
+                        'arena_extend_strategy': 'kNextPowerOfTwo',
+                        'cudnn_conv_algo_search': 'HEURISTIC',
+                    }),
+                    'CPUExecutionProvider'
+                ]
+                
+                self.recognizer = ort.InferenceSession(
+                    self.rec_model_path, 
+                    sess_options=sess_options,
+                    providers=providers
+                )
+                active = self.recognizer.get_providers()
+                print(f"✅ GhostFaceNetV2 initialized. Providers: {active}")
             
-            print("Face models initialized successfully.")
+            print("✅ Face models initialized successfully.")
 
         except Exception as e:
-            print(f"Error loading Face models: {e}")
+            print(f"❌ Error loading Face models: {e}")
             raise e
 
     def _preprocess_recognition(self, image, keypoints):
@@ -147,7 +172,10 @@ class FaceModel(BaseModel):
             
         results = []
         
-        input_name = self.recognizer.get_inputs()[0].name 
+        # Get input name for recognizer if available
+        input_name = None
+        if self.recognizer:
+            input_name = self.recognizer.get_inputs()[0].name
 
         for frame in frames:
             frame_res = []
@@ -166,12 +194,15 @@ class FaceModel(BaseModel):
             try:
                 _, faces = self.detector.detect(frame)
             except Exception as e:
+                import traceback
                 print(f"Error in YuNet Detection: {e}")
+                traceback.print_exc()
                 faces = None
             
             if faces is not None:
                 for face_data in faces:
                     confidence = face_data[14]
+                    print(f"DEBUG-FACE: YuNet detected face with score {confidence:.2f}")
                     bbox = face_data[0:4].astype(int) # x, y, w, h
                     
                     # Convert xywh to xyxy
@@ -185,18 +216,24 @@ class FaceModel(BaseModel):
                     face_blob = self._preprocess_recognition(frame, landmarks)
                     
                     if face_blob is not None:
-                        # Run Inference
-                        embedding = self.recognizer.run(None, {input_name: face_blob})[0]
-                        # embedding shape (1, 512)
-                        
-                        # Normalize embedding (L2)
-                        embedding = embedding / np.linalg.norm(embedding)
+                        # Run Inference only if recognizer is available
+                        if self.recognizer and input_name:
+                            print("DEBUG-FACE: Running GhostFaceNetV2 recognition...")
+                            embedding = self.recognizer.run(None, {input_name: face_blob})[0]
+                            # embedding shape (1, 512)
+                            
+                            # Normalize embedding (L2)
+                            embedding = embedding / np.linalg.norm(embedding)
+                            embedding = embedding.flatten()
+                        else:
+                            # No recognizer - use zeros as placeholder embedding
+                            embedding = np.zeros(512, dtype=np.float32)
                         
                         res_obj = FaceResult(
                             bbox=np.array([x1, y1, x2, y2]), # Ensure numpy for compatibility
                             kps=landmarks,
                             det_score=confidence,
-                            embedding=embedding.flatten()
+                            embedding=embedding
                         )
                         frame_res.append(res_obj)
             

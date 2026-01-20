@@ -19,8 +19,14 @@ class SecurityProcessor(BaseProcessor):
         self.spatial = SpatialAnalytics()
 
         self.frame_counter = 0
-        self.SKIP_FACTOR = 2  # Reduced to 2 for smoother updates (latency optimization)
-        self.track_state = {} # Cache: {track_id: {'name': str, 'color': tuple, 'last_check': float}}
+        self.SKIP_FACTOR = 1  # Process every frame for stability/debugging
+        self.track_state = {} 
+        self.lpr_cooldowns = {} # Added: {cam_id: {plate: last_t}}
+        self.face_alert_cooldowns = {} # Added: {cam_id: {key: last_t}}
+        
+        # ThreadPool for LPR (IO/CPU heavy per crop)
+        import concurrent.futures
+        self.lpr_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 
     def save_event_async(self, *args, **kwargs):
@@ -91,6 +97,7 @@ class SecurityProcessor(BaseProcessor):
                       self.db.conn.rollback()
 
     def process_batch(self, frames, camera_ids, configs, gpu_frames=None):
+        print(f"🔄 DEBUG: process_batch START ({len(frames)} frames). Shape: {frames[0].shape}", flush=True)
         start_time = time.time()
         
         # --- 1. PP-Human Inference (Batch) ---
@@ -101,6 +108,8 @@ class SecurityProcessor(BaseProcessor):
         else:
              pp_results_batch = self.yolo_model.predict(frames, camera_ids=camera_ids, camera_configs=configs)
         
+        print(f"🔄 DEBUG: YOLO finished", flush=True)
+        
         # DEBUG: Print detection stats
         for i, res in enumerate(pp_results_batch):
              if len(res.boxes) > 0:
@@ -109,16 +118,10 @@ class SecurityProcessor(BaseProcessor):
         # Increment counter
         self.frame_counter += 1
         run_heavy_models = (self.frame_counter % self.SKIP_FACTOR == 0)
-        # --- 2. PP-Vehicle Inference (Batch) ---
-        pp_vehicle_results = []
-        if self.vehicle_model:
-             # Just pass frames (or gpu_frames if PPVehicle supports it, assuming yes)
-             # Note: Using gpu_frames here might need verifying if PPVehicle expects Tensor.
-             # Our wrapper PPVehicleModel currently assumes frames or manually handles conversion.
-             # Let's pass 'frames' (CPU) for safety in this iteration, or 'gpu_frames' if bold.
-             # Safe bet: pass frames.
-             pp_vehicle_results = self.vehicle_model.predict(frames, camera_ids=camera_ids)
-             print(f"🚙 DEBUG-VEHICLE: Results for {len(camera_ids)} cams. Has plates? {any(r.plates for r in pp_vehicle_results) if pp_vehicle_results else 'No'}", flush=True)
+        # --- 2. PP-Vehicle Inference (REMOVED - Unified with YOLO) ---
+        # We no longer run a separate vehicle model inference.
+        # Everything (Person/Car/Bus/Truck) is now handled by yolo_model in one batch.
+        pp_vehicle_results = [] # Placeholder for compatibility if needed elsewhere
         
         # --- 3. Prepare Face Recognition Batch (with Track Caching) ---
         face_crops = []
@@ -237,93 +240,105 @@ class SecurityProcessor(BaseProcessor):
         if face_crops:
             print(f"⚡ DEBUG: Analyzing {len(face_crops)} detected faces...", flush=True)
             # Predict all faces at once
+            print(f"🔄 DEBUG: Face Model Predict Start", flush=True)
             all_faces_analysis = self.face_model.predict(face_crops)
+            print(f"🔄 DEBUG: Face Model Predict End", flush=True)
             print(f"✅ DEBUG: YuNet returned {len(all_faces_analysis)} results", flush=True)
             
-            # Re-map results
+            # Prepare Parallel Search Tasks
+            search_tasks = []
+            search_metadata = []
+
             for k, faces in enumerate(all_faces_analysis):
-                # faces is a list of Face objects found in the crop
-                
                 # Metadata
                 batch_idx, tid, crop_bbox, cfg_data = face_metadata[k]
-                cx1, cy1, cx2, cy2 = crop_bbox
                 
-                if not faces:
-                    # No face found in crop
-                    continue
+                if not faces: continue
                 
                 # Sort by size (largest face)
                 faces = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
                 primary_face = faces[0]
                 
-                # Identify
+                # Config
                 threshold = config.SIMILARITY_THRESHOLD
                 face_cfg = cfg_data.get("face_config") if cfg_data else None
                 if face_cfg and "threshold" in face_cfg:
                     threshold = float(face_cfg["threshold"])
-
                 org_id = cfg_data.get("org_id") if cfg_data else None
 
-                # Perform Search
-                match = None
-                is_from_global = False
-
+                # Create Search Task
+                task_meta = {
+                    "k": k,
+                    "primary_face": primary_face,
+                    "threshold": threshold,
+                    "org_id": org_id,
+                    "camera_id": camera_ids[face_metadata[k][0]],
+                    "crop_bbox": crop_bbox,
+                    "cfg_data": cfg_data
+                }
+                
                 if self.face_cache and org_id and self.loop:
-                    # Use cache (Thread-Safe Call to Main Loop)
-                    import asyncio
-                    try:
-                        future = asyncio.run_coroutine_threadsafe(self.face_cache.search(
-                            query_embedding=primary_face.embedding,
-                            org_id=org_id,
-                            threshold=threshold,
-                            include_global_blacklist=True
-                        ), self.loop)
-                        
-                        # Wait for result (Block this thread, not main loop)
-                        match = future.result(timeout=1.0) # 1s timeout safety
-                        
-                    except Exception as e:
-                        print(f"Face Cache Error: {e}")
-                        match = None
-                        
-                    if match:
-                        face_id, name, category, similarity, is_from_global = match
+                     import asyncio
+                     future = asyncio.run_coroutine_threadsafe(self.face_cache.search(
+                        query_embedding=primary_face.embedding,
+                        org_id=org_id,
+                        threshold=threshold,
+                        include_global_blacklist=True
+                     ), self.loop)
+                     search_tasks.append(future)
+                     search_metadata.append(task_meta)
                 else:
-                    # Fallback DB
-                    db_match = self.db.find_nearest_face(primary_face.embedding)
-                    if db_match:
+                    # Fallback Sync DB (Cannot parallelize easily without threadpool)
+                    # Treat as immediate result
+                    search_tasks.append(None) 
+                    search_metadata.append(task_meta)
+
+            # Wait for all async tasks (Parallel Execution)
+            results = []
+            for future in search_tasks:
+                if future:
+                    try:
+                        results.append(future.result(timeout=2.0))
+                    except Exception as e:
+                        print(f"Face Cache Future Error: {e}")
+                        results.append(None)
+                else:
+                    results.append(None)
+
+            # Process Results
+            print(f"🔄 DEBUG: Async Search/DB finished", flush=True)
+            for i, result in enumerate(results):
+                meta = search_metadata[i]
+                primary_face = meta["primary_face"]
+                k = meta["k"]
+                
+                match = result
+                
+                # Fallback if no cache result
+                if not match and not search_tasks[i]: 
+                     # Only run DB fallback if we didn't use cache or cache failed locally
+                     # (In this logic, if tasks[i] was None, it means we must use Sync DB)
+                     db_match = self.db.find_nearest_face(primary_face.embedding)
+                     if db_match:
                         db_name, distance = db_match
-                        req_dist = 1.0 - threshold
+                        req_dist = 1.0 - meta["threshold"]
                         if distance < req_dist:
                             match = (None, db_name, 'KNOWN', 1.0 - distance, False)
 
                 # Determine Result
+                batch_idx = face_metadata[k][0] # Map back to frame index
+                
                 if match:
-                    _, name, category, similarity, is_from_global = match
-                    if category == 'BLACKLIST':
-                        color = (0, 0, 255) if not is_from_global else (255, 0, 255)
-                        # Alert Logic
-                        if self.publish_callback:
-                             # ... (Same as before)
-                             pass # Ideally refactor alert logic to avoid duplication
-                    elif category == 'KNOWN':
-                        color = (0, 255, 0)
-                    else:
-                        color = (255, 255, 0)
-                    
-                    # Update Cache/DB Events logic (Simplified for length)
-                    # We should preserve the intense event saving logic from original
-                    # ... [Insert Event Saving Logic Here if possible, or assume it's same]
-                    # For brevity in this tool call, I will reimplement the basic event save.
-                    
-                    # Re-implementing simplified event save to fit replacement:
-                    self._handle_face_event(camera_id, name, category, similarity, is_from_global, abs_box)
+                    face_id, name, category, similarity, is_from_global = match
+                    cam_id_for_event = camera_ids[batch_idx]
+                    self._handle_face_event(cam_id_for_event, name, category, similarity, is_from_global, crop_bbox)
 
                 else:
                     name = "Unknown"
                     color = (0, 0, 255)
-                    # Check Auto-save
-                    self._handle_unknown_face(camera_id, org_id, cfg_data, primary_face.embedding)
+                    # Check Auto-save - use camera_ids[batch_idx] instead of undefined camera_id
+                    cam_id_for_event = camera_ids[batch_idx]
+                    self._handle_unknown_face(cam_id_for_event, org_id, cfg_data, primary_face.embedding)
 
                 # Store absolute bbox relative to original frame? 
                 # Note: The crop was from the frame, so face bbox is relative to crop.
@@ -402,61 +417,41 @@ class SecurityProcessor(BaseProcessor):
             if icfg:
                  intrusion_classes = icfg.get("classes", config.DEFAULT_INTRUSION_CLASSES)
             
-            # --- PROCESS PP-VEHICLE RESULTS ---
-            if i < len(pp_vehicle_results):
-                 veh_res = pp_vehicle_results[i]
-                 
-                 # Annotate vehicles
-                 if hasattr(veh_res, 'boxes'):
-                     for k, bbox in enumerate(veh_res.boxes):
-                         cls_id = veh_res.cls[k]
-                         score = veh_res.conf[k]
-                         x1, y1, x2, y2 = map(int, bbox)
-                         
-                         # Draw Box (Blue for Vehicle)
-                         # color = (255, 0, 0) 
-                         # cv2.rectangle(frame_viz, (x1, y1), (x2, y2), color, 2)
-                         
-                         label = "Vehicle"
-                         if cls_id == 0: label = "Car"
-                         elif cls_id == 1: label = "Truck"
-                         elif cls_id == 2: label = "Bus"
-                         elif cls_id == 3: label = "Moto"
-                         
-                         # Check LPR
-                         if veh_res.plates:
-                             # Use simple index matching if list, or key if dict
-                             plate_text = veh_res.plates.get(k) 
-                             if plate_text:
-                                 label += f" [{plate_text}]"
-                                 # Save Event
-                                 curr_t = time.time()
-                                 if not hasattr(self, 'lpr_cooldowns'): self.lpr_cooldowns = {}
-                                 if camera_id not in self.lpr_cooldowns: self.lpr_cooldowns[camera_id] = {}
-                                 
-                                 last_lpr = self.lpr_cooldowns[camera_id].get(plate_text, 0)
-                                 if (curr_t - last_lpr) > 10.0: # 10s debounce
-                                     print(f"💾 Saving LPR Event: {plate_text}", flush=True)
-                                     self.save_event_async(
-                                         camera_id,
-                                         "lpr",
-                                         plate_text, # Track ID = Plate
-                                         confidence=float(score),
-                                         bbox=[x1, y1, x2, y2],
-                                         severity="INFO"
-                                     )
-                                     self.lpr_cooldowns[camera_id][plate_text] = curr_t
-                                 
-                         # cv2.putText(frame_viz, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            # --- END VEHICLE RESULTS ---
+            # --- VEHICLE RESULTS (Handled in main loop below) ---
+        # The previous vehicle_model logic was redundant. 
+        # Visualization and Event detection is now integrated into the results loop below.
+        # --- END VEHICLE RESULTS ---
 
-            cfg = config_data # Alias for below
+            # Use configs[i] which is already defined at this scope (was: cfg = config_data which was undefined)
+            # cfg is already set at line 355, so we just continue using it
             lcfg = cfg.get("line_crossing_config") if cfg else None
             if lcfg:
                  line_classes = lcfg.get("classes", config.DEFAULT_LINE_CROSSING_CLASSES)
             
             spatial_cam.set_classes(intrusion_classes, line_classes)
             
+            # TEST: Inject zones for specific camera (User Request)
+            if camera_id == "ee7433b9-d6e1-41f2-bc92-ae931e884d4c":
+                 if "intrusion" not in features: features.append("intrusion")
+                 if "line_crossing" not in features: features.append("line_crossing")
+                 
+                 # Define Test Zones (Normalized to 640x640 usually, but input here is likely relative or absolute)
+                 # The set_polygon_zone handles scaling if > 1.5. 
+                 # Let's use relative [0-1] to be safe and independent of resolution.
+                 
+                 # Intrusion: Center Area
+                 if "intrusion" not in zones:
+                     zones["intrusion"] = {
+                         "points": [[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]]
+                     }
+                 
+                 # Line: Horizontal across
+                 if "line_crossing" not in zones:
+                     zones["line_crossing"] = {
+                         "points": [[0.1, 0.5], [0.9, 0.5]],
+                         "trigger": "in_out"
+                     }
+
             # Use TARGET_SIZE for spatial zones since frame_viz is resized
             if "line_crossing" in features and "line_crossing" in zones and zones["line_crossing"]:
                  spatial_cam.set_line_zone(zones["line_crossing"].get("points", []), zones["line_crossing"].get("trigger", "in_out"), TARGET_SIZE)
@@ -471,9 +466,16 @@ class SecurityProcessor(BaseProcessor):
             # --- PP-Human Action Recognition (Fight/Fall) ---
             # Check for generic action events
             if hasattr(pp_results, 'actions') and pp_results.actions:
-                # actions dict: {track_id: "fighting"}
+                # actions dict: {track_id: (label, score)} or {track_id: label}
                 current_time = time.time()
-                for tid, action in pp_results.actions.items():
+                for tid, action_val in pp_results.actions.items():
+                    # Handle tuple vs string
+                    action = action_val
+                    score = 1.0
+                    if isinstance(action_val, (tuple, list)):
+                        action = action_val[0]
+                        score = float(action_val[1])
+
                     # Map action to event_type
                     event_type = None
                     if action == "fighting": event_type = "fight_detection"
@@ -674,18 +676,30 @@ class SecurityProcessor(BaseProcessor):
                          elif cls_id == 3: label = "Moto"
                          
                          plate = None
-                         if veh_res.plates:
+                         if hasattr(veh_res, 'plates') and veh_res.plates:
                              plate = veh_res.plates.get(k)
                              
+                         # Attributes (Color, Type)
+                         attrs = None
+                         if hasattr(veh_res, 'attributes') and veh_res.attributes:
+                             raw_attr = veh_res.attributes.get(k)
+                             if raw_attr:
+                                 if isinstance(raw_attr, (tuple, list)) and len(raw_attr) >= 2:
+                                     attrs = {"color": raw_attr[0], "type": raw_attr[1]}
+                                 else:
+                                     attrs = {"raw": str(raw_attr)}
+                             
                          frame_meta["vehicles"].append({
-                             "bbox": [nbx1, nby1, nbx2, nby2],
-                             "label": label,
-                             "lpr": plate,
-                             "score": score
-                         })
+                            "bbox": [nbx1, nby1, nbx2, nby2],
+                            "label": label,
+                            "lpr": plate,
+                            "score": score,
+                            "attributes": attrs
+                        })
 
             # Add Person Data (Generic Object Detection)
             if hasattr(pp_results, 'boxes'):
+                 lpr_tasks = [] # Initialize task list for this frame
                  for k, bbox in enumerate(pp_results.boxes):
                      # cls and conf might be tensors or numpy arrays, ensure float/int conversion
                      # PP-Human results structure check:
@@ -698,7 +712,7 @@ class SecurityProcessor(BaseProcessor):
                          score = float(pp_results.conf[k])
                          print(f"🕵️ DEBUG DET: cls_id={cls_id} score={score:.4f}", flush=True)
 
-                         if cls_id == 0: # 0 is Person in COCO/PP-YOLOE
+                         if cls_id == 0: # person
                              bx1, by1, bx2, by2 = map(int, bbox)
                              
                              # Normalize using TARGET_SIZE (since pp_results.boxes were scaled to TARGET_SIZE in line 365)
@@ -708,12 +722,31 @@ class SecurityProcessor(BaseProcessor):
                              nbx2 = max(0, min(1, bx2 / t_w))
                              nby2 = max(0, min(1, by2 / t_h))
                              
+                             
+                             # Get Track ID if available
+                             tid = None
+                             if hasattr(pp_results, 'id') and k < len(pp_results.id):
+                                 tid = pp_results.id[k]
+
+                             # Retrieve Attributes & ReID
+                             attrs = pp_results.attributes.get(tid) if tid is not None else None
+                             reid_emb = pp_results.reid.get(tid) if tid is not None and hasattr(pp_results, 'reid') else None
+                             
+                             # Simplify ReID for metadata (too large to send raw vector)
+                             reid_hash = None
+                             if reid_emb is not None:
+                                 # Simple hash or truncate for ID matching
+                                 reid_hash = str(hash(reid_emb.tobytes()) % 1000000)
+
                              frame_meta["persons"].append({
                                  "bbox": [nbx1, nby1, nbx2, nby2],
-                                 "score": score
+                                 "score": score,
+                                 "track_id": tid,
+                                 "attributes": attrs,
+                                 "reid_id": reid_hash
                              })
                              
-                         elif cls_id in [2, 3, 5, 7]: # Vehicles
+                         elif cls_id in [1, 2, 3, 5, 7]: # Vehicles (Bike, Car, Moto, Bus, Truck)
                              bx1, by1, bx2, by2 = map(int, bbox)
                              nbx1 = max(0, min(1, bx1 / t_w))
                              nby1 = max(0, min(1, by1 / t_h))
@@ -721,50 +754,103 @@ class SecurityProcessor(BaseProcessor):
                              nby2 = max(0, min(1, by2 / t_h))
                              
                              label = "Vehicle"
-                             if cls_id == 2: label = "Car"
-                             elif cls_id == 7: label = "Truck"
-                             elif cls_id == 5: label = "Bus"
+                             if cls_id == 1: label = "Bicycle"
+                             elif cls_id == 2: label = "Car"
                              elif cls_id == 3: label = "Moto"
-                            
-                             # Run LPR (ONNX) - Use ORIGINAL frame (higher res) for better OCR
-                             plate_text = None
-                             if self.lpr_model and "lpr" in features:
-                                 try:
-                                     # Optimization 7: Use original frame, not resized
-                                     # bx1,by1,bx2,by2 are in TARGET_SIZE coords, scale to original
-                                     vh, vw = orig_h, orig_w
-                                     # Scale from TARGET_SIZE to original frame size
-                                     scale_x_inv = orig_w / t_w
-                                     scale_y_inv = orig_h / t_h
-                                     
-                                     vx1 = int(max(0, min(bx1 * scale_x_inv, vw)))
-                                     vy1 = int(max(0, min(by1 * scale_y_inv, vh)))
-                                     vx2 = int(max(0, min(bx2 * scale_x_inv, vw)))
-                                     vy2 = int(max(0, min(by2 * scale_y_inv, vh)))
-                                     
-                                     if (vx2 - vx1) > 50 and (vy2 - vy1) > 50:  # Min 50px for LPR
-                                         vehicle_crop = frame[vy1:vy2, vx1:vx2]  # Use original frame
-                                         # Predict
-                                         lpr_result = self.lpr_model.predict(vehicle_crop)
-                                         if lpr_result.label:
-                                             plate_text = lpr_result.label
-                                             print(f"🈯 Plate Detected: {plate_text} on {label}", flush=True)
+                             elif cls_id == 5: label = "Bus"
+                             elif cls_id == 7: label = "Truck"
 
-                                 except Exception as e:
-                                     print(f"LPR Crop Error: {e}", flush=True)
-                            
+                             # Prepare LPR Data (defer execution)
+                             plate_text = None
+                             
+                             # LPR Optimization: Cache Check
+                             should_run_lpr = False
+                             if self.lpr_model and "lpr" in features:
+                                 should_run_lpr = True
+                                 if tid: # Only if tracked
+                                     if not hasattr(self, "lpr_results_cache"): self.lpr_results_cache = {}
+                                     last_cache = self.lpr_results_cache.get(tid)
+                                     if last_cache:
+                                         ts, cached_plate = last_cache
+                                         if (time.time() - ts) < 3.0: # 3s Cache
+                                            should_run_lpr = False
+                                            plate_text = cached_plate # Use cached result
+                                 
+                             if should_run_lpr:
+                                  try:
+                                      # Scale to original resolution
+                                      scale_x_inv = orig_w / t_w
+                                      scale_y_inv = orig_h / t_h
+                                      vx1 = int(max(0, min(bx1 * scale_x_inv, orig_w)))
+                                      vy1 = int(max(0, min(by1 * scale_y_inv, orig_h)))
+                                      vx2 = int(max(0, min(bx2 * scale_x_inv, orig_w)))
+                                      vy2 = int(max(0, min(by2 * scale_y_inv, orig_h)))
+                                      
+                                      if (vx2 - vx1) > 50 and (vy2 - vy1) > 50:
+                                          vehicle_crop = frame[vy1:vy2, vx1:vx2]
+                                          lpr_tasks.append({
+                                              'crop': vehicle_crop,
+                                              'meta_idx': len(frame_meta["vehicles"]), # Index in the current list
+                                              'frame_meta_ref': frame_meta["vehicles"], # Reference to list
+                                              'label': label,
+                                              'score': score,
+                                              'bbox': [bx1, by1, bx2, by2], # Original scale bbox for event
+                                              'cam_id': camera_id,
+                                              'tid': tid
+                                          })
+                                  except Exception as e:
+                                      pass
+
                              frame_meta["vehicles"].append({
                                  "bbox": [nbx1, nby1, nbx2, nby2],
                                  "label": label,
-                                 "lpr": plate_text,
+                                 "lpr": plate_text, # Will fill later if task runs, or cached
                                  "score": score
                              })
-                             # print(f"🚗 {label} detected: {score:.2f} at {frame_meta['vehicles'][-1]['bbox']}", flush=True)
                      except Exception as e:
-                         # Safeguard against index errors or type issues
                          pass
 
+            # --- Execute Parallel LPR for this frame ---
+            if lpr_tasks:
+                futures = {self.lpr_executor.submit(self.lpr_model.predict, t['crop']): t for t in lpr_tasks}
+                for future in concurrent.futures.as_completed(futures):
+                    t = futures[future]
+                    try:
+                        lpr_result = future.result()
+                        if lpr_result.label:
+                            plate_text = lpr_result.label
+                            # Update Frame Meta
+                            t['frame_meta_ref'][t['meta_idx']]['lpr'] = plate_text
+                            
+                            # Update Cache
+                            if t.get('tid'):
+                                if not hasattr(self, "lpr_results_cache"): self.lpr_results_cache = {}
+                                self.lpr_results_cache[t['tid']] = (time.time(), plate_text) # Use plate_text here
+                            
+                            print(f"🈯 Plate Detected: {plate_text} on {t['label']}", flush=True)
+
+                            # Event Logic
+                            curr_t = time.time()
+                            if not hasattr(self, 'lpr_cooldowns'): self.lpr_cooldowns = {}
+                            cid = t['cam_id']
+                            if cid not in self.lpr_cooldowns: self.lpr_cooldowns[cid] = {}
+                            
+                            last_lpr = self.lpr_cooldowns[cid].get(plate_text, 0)
+                            if (curr_t - last_lpr) > 10.0:
+                                self.save_event_async(
+                                    cid,
+                                    "lpr",
+                                    plate_text,
+                                    confidence=float(t['score']),
+                                    bbox=t['bbox'],
+                                    severity="INFO"
+                                )
+                                self.lpr_cooldowns[cid][plate_text] = curr_t
+                    except Exception as e:
+                        print(f"LPR Future Error: {e}")
+
             batch_metadata.append(frame_meta)
+
             processed_frames.append(annotated_frame)
 
         return processed_frames, batch_metadata

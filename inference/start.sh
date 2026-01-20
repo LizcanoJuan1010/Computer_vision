@@ -3,16 +3,8 @@ set -ex
 
 echo "🚀 INFO: Inference Service Startup Script Initiated"
 
-# Install missing dependencies for PaddleOCR (LPR)
-echo "🔧 Installing LPR Dependencies..."
-pip install shapely pyclipper scikit-image --break-system-packages || true
-
-# Ensure Headless OpenCV (Fixes SIGABRT/Qt crashes)
-echo "🔧 Ensuring Headless OpenCV..."
-# Remove system package which conflicts with pip, install libgeos for Shapely
-apt-get update && apt-get remove -y python3-opencv && apt-get install -y libgeos-dev || true
-pip uninstall -y opencv-python opencv-contrib-python || true
-pip install opencv-contrib-python-headless --break-system-packages || true
+# Runtime Dependencies handled in Dockerfile
+echo "✅ Operational Environment Ready"
 
 echo "✅ Using RT-DETR ONNX Runtime (No export needed)"
 

@@ -122,7 +122,7 @@ class SpatialAnalytics:
                  polygon[:, 0] = np.clip(polygon[:, 0], 0, current_w)
                  polygon[:, 1] = np.clip(polygon[:, 1], 0, current_h)
 
-            self.polygon_zone = sv.PolygonZone(polygon=polygon, frame_resolution_wh=frame_wh)
+            self.polygon_zone = sv.PolygonZone(polygon=polygon)
             self.polygon_annotator = sv.PolygonZoneAnnotator(
                 zone=self.polygon_zone, color=sv.Color.RED, thickness=2, text_thickness=1, text_scale=0.5
             )
@@ -300,7 +300,32 @@ class SpatialAnalytics:
 
         intrusion_ids = []
         if self.polygon_zone is not None:
-            is_inside = self.polygon_zone.trigger(detections=detections_intrusion_logic)
+            # Custom Logic: Check Feet OR Center (User Request)
+            # self.polygon_zone.trigger() uses Bottom Center by default.
+            # We implement manual check to support BOTH.
+            
+            poly = self.polygon_zone.polygon.astype(np.int32)
+            is_inside_list = []
+            
+            for i, box in enumerate(detections_intrusion_logic.xyxy):
+                 x1, y1, x2, y2 = box
+                 
+                 # 1. Feet (Bottom Center)
+                 feet_x = int((x1 + x2) / 2)
+                 feet_y = int(y2)
+                 # measureDist=False returns +1 (inside), -1 (outside), 0 (on edge)
+                 # We treat >= 0 as inside
+                 in_feet = cv2.pointPolygonTest(poly, (feet_x, feet_y), False) >= 0
+                 
+                 # 2. Center
+                 c_x = int((x1 + x2) / 2)
+                 c_y = int((y1 + y2) / 2)
+                 in_center = cv2.pointPolygonTest(poly, (c_x, c_y), False) >= 0
+                 
+                 is_inside_list.append(in_feet or in_center)
+            
+            is_inside = np.array(is_inside_list) # Boolean mask
+
             if np.any(is_inside) and detections_intrusion_logic.tracker_id is not None:
                 intrusion_ids = detections_intrusion_logic.tracker_id[is_inside].tolist()
 

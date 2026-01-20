@@ -1,0 +1,15 @@
+{
+  "training_info": {
+    "export_date": "2026-01-14T14:13:41.728037",
+    "dataset": "MOT20",
+    "model": "PPYOLOE-s",
+    "task": "Person Detection",
+    "num_classes": 1,
+    "classes": [
+      "person"
+    ]
+  },
+  "best_metrics": {},
+  "training_history": [],
+  "final_evaluation": {}
+}

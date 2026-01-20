@@ -126,7 +126,7 @@ services:
       - RESIZE_WIDTH=1280
       - RESIZE_HEIGHT=720
       - TARGET_FPS=30.0
-      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-udp}
+      - RTSP_TRANSPORT=${RTSP_TRANSPORT:-tcp}
     ports:
       - "8088:8080" # Metrics port
     networks:
@@ -141,6 +141,7 @@ services:
     build: ./inference
     image: vigias-inference
     restart: "no"  # Prevent cascade restarts - GPU issues shouldn't affect other services
+
     volumes:
       - ./inference:/app/inference
       # Mount cache for models to avoid re-downloading
@@ -148,6 +149,7 @@ services:
       - ./inference/weights:/app/weights
       - /etc/localtime:/etc/localtime:ro
     environment:
+      - PYTHONUNBUFFERED=1
       - NATS_URL=nats://nats:4222
       - REDIS_URL=redis://redis:6379/0
       - DB_HOST=postgres
@@ -165,6 +167,7 @@ services:
       - FACE_CACHE_L1_CAPACITY=1000
       - SIMILARITY_THRESHOLD=0.85
       # Optimization - Enabled: TensorRT upgraded for Blackwell support
+      - USE_GPU=true
       - USE_TENSORRT=true
       - TENSORRT_PRECISION=fp16
       # Performance Tuning
@@ -205,6 +208,24 @@ services:
       - "9099:9090"
     networks:
       - vision_net
+
+  simulator:
+    build: ./simulator
+    container_name: computer_vision-simulator
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=vigias
+      - MEDIAMTX_HOST=mediamtx
+    volumes:
+      - ./test_videos:/app/videos
+    networks:
+      - vision_net
+    depends_on:
+      - mediamtx
+      - postgres
+    restart: unless-stopped
 
 volumes:
   postgres_data:

@@ -19,12 +19,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libsndfile1 \
     libglib2.0-0 \
+    libgeos-dev \
     # Clean up immediately to reduce size
     && rm -rf /var/lib/apt/lists/*
+
+# Pre-uninstall conflicting opencv if present in base image
+RUN python -m pip uninstall -y opencv-python opencv-contrib-python || true
 
 # 2. PYTHON DEPENDENCIES
 # Paddle/TensorRT/CUDA are ALREADY INSTALLED in this image!
 # Note: Ubuntu 24.04+ (PEP 668) requires --break-system-packages for system-wide pip installs
+# CRITICAL: onnxruntime-gpu >= 1.19 required for CUDA 12.x + cuDNN 9.x compatibility
 
 RUN python -m pip install --no-cache-dir --break-system-packages \
     "numpy<2.0.0" \
@@ -32,7 +37,7 @@ RUN python -m pip install --no-cache-dir --break-system-packages \
     scikit-image \
     imgaug \
     onnx \
-    onnxruntime-gpu \
+    "onnxruntime-gpu>=1.20.0" \
     pyclipper \
     lmdb \
     tqdm \

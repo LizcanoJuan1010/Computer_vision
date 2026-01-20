@@ -5,7 +5,7 @@ import json
 import time
 import numpy as np
 import cv2
-import paddle
+#import paddle
 import nats
 import signal
 import threading
@@ -15,8 +15,8 @@ from prometheus_client import start_http_server, Counter, Histogram, Gauge
 from aiohttp import web
 
 # CRITICAL: Set Paddle device BEFORE any model loading
-paddle.set_device('gpu:0')
-print(f"✅ Paddle Device set to: {paddle.get_device()}")
+# paddle.set_device('gpu:0') # DISABLED: Conflict with ONNX Runtime on RTX 5060 Ti?
+# print(f"✅ Paddle Device set to: {paddle.get_device()}")
 
 # --- Prometheus Metrics ---
 PROCESSING_LATENCY = Histogram('processing_latency_seconds', 'Time spent processing a batch of frames')
@@ -45,89 +45,133 @@ class ThreadedRTSPReader:
     """
     Threaded RTSP reader that continuously decodes frames in background threads.
     Each camera gets its own decoder thread. Frames are stored in a shared buffer.
+    Supports dynamic adding/removing of cameras.
     """
     
     def __init__(self, camera_urls: dict, target_size=(640, 640)):
-        self.camera_urls = camera_urls
+        self.camera_urls = {} # Cid -> URL
         self.target_size = target_size
         self.frames = {}           # cid -> latest frame (resized, RGB)
         self.original_frames = {}  # cid -> original frame (RGB)
         self.locks = {}            # cid -> threading.Lock
         self.running = True
-        self.threads = []
+        self.threads = {}          # cid -> Thread
         
-        for cid in camera_urls.keys():
-            self.frames[cid] = None
-            self.original_frames[cid] = None
-            self.locks[cid] = threading.Lock()
-        
-        # Start reader threads
-        for cid, url in camera_urls.items():
-            t = threading.Thread(target=self._reader_loop, args=(cid, url), daemon=True)
-            t.start()
-            self.threads.append(t)
-            print(f"🧵 Started reader thread for camera {cid[:8]}...")
-    
+        # Initial Load
+        self.update(camera_urls)
+            
     def _letterbox_resize(self, img, target_size):
         """Resize image by stretching to target size (fixes coordinate alignment)."""
-        # We use simple resize (stretch) instead of letterbox because
-        # SpatialAnalytics polygons are defined relative (0-1) to the FULL frame.
-        # If we add black bars (letterbox), the polygons (mapped to full 640x640)
-        # will not align with the video content (which is smaller/centered).
         return cv2.resize(img, target_size, interpolation=cv2.INTER_LINEAR)
     
+    def add_camera(self, cid, url):
+        if cid in self.threads and self.threads[cid].is_alive():
+            print(f"⚠️ Camera {cid[:8]} already running.", flush=True)
+            return
+
+        print(f"➕ Adding camera {cid[:8]}...", flush=True)
+        self.camera_urls[cid] = url
+        self.frames[cid] = None
+        self.original_frames[cid] = None
+        self.locks[cid] = threading.Lock()
+        
+        t = threading.Thread(target=self._reader_loop, args=(cid, url), daemon=True)
+        t.start()
+        self.threads[cid] = t
+        print(f"🧵 Started reader thread for camera {cid[:8]}...", flush=True)
+
+    def remove_camera(self, cid):
+        if cid in self.camera_urls:
+            print(f"➖ Removing camera {cid[:8]}...", flush=True)
+            del self.camera_urls[cid] # This signals the thread to stop
+            # We cleanup frames/locks in the get_frames loop or let them stay until garbage collected?
+            # Better to clean up to save memory
+            if cid in self.frames: del self.frames[cid]
+            if cid in self.original_frames: del self.original_frames[cid]
+            if cid in self.locks: del self.locks[cid]
+            if cid in self.threads: del self.threads[cid]
+
+    def update(self, new_camera_urls: dict):
+        """Update the list of active cameras. Valid for Hot-Reload."""
+        current_cids = set(self.camera_urls.keys())
+        new_cids = set(new_camera_urls.keys())
+        
+        # Calculate diff
+        to_add = new_cids - current_cids
+        to_remove = current_cids - new_cids
+        
+        if not to_add and not to_remove:
+            return
+
+        print(f"🔄 Updating Cameras. Adding: {len(to_add)}, Removing: {len(to_remove)}", flush=True)
+
+        for cid in to_remove:
+            self.remove_camera(cid)
+            
+        for cid in to_add:
+            self.add_camera(cid, new_camera_urls[cid])
+
     def _reader_loop(self, cid: str, url: str):
         """Background thread that continuously reads and decodes RTSP frames."""
-        while self.running:
+        print(f"🎬 Stream Thread Started: {cid[:8]}", flush=True)
+        while self.running and cid in self.camera_urls:
             container = None
             try:
                 options = {
                     'rtsp_transport': 'tcp',
-                    'fflags': 'nobuffer',
-                    'flags': 'low_delay',
                     'stimeout': '5000000',
-                    'reorder_queue_size': '0'
+                    # 'fflags': 'nobuffer', # Possible culprit
+                    # 'flags': 'low_delay',
+                    # 'reorder_queue_size': '0'
                 }
                 container = av.open(url, options=options)
                 stream = container.streams.video[0]
                 stream.thread_type = 'AUTO'
                 
-                print(f"✅ Connected: {cid[:8]}...")
+                print(f"✅ Connected: {cid[:8]}...", flush=True)
                 
+                packet_count = 0
                 for packet in container.demux(stream):
-                    if not self.running:
+                    if not self.running or cid not in self.camera_urls:
+                        print(f"🛑 Stopping stream {cid[:8]} (Signal received)", flush=True)
                         break
                     
                     try:
                         frames = packet.decode()
                         if frames:
+                            packet_count += 1
+                            if packet_count % 100 == 0:
+                                print(f"📺 {cid[:8]} Decoded {packet_count} frames...", flush=True)
+                            
                             frame_obj = frames[-1]
                             
                             # Convert to RGB numpy (Model expects RGB usually)
                             img = frame_obj.to_ndarray(format='rgb24')
                             
-                            # Performance: Resize huge frames (e.g. 2K/4K) to 720p to speed up inference transfer
+                            # Performance check
                             h, w = img.shape[:2]
                             if w > 1280:
                                 new_w = 1280
                                 new_h = int(h * (1280 / w))
                                 img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
                             
-                            # Store ORIGINAL resolution for model (now capped at 720p)
-                            # and RESIZED for visualization/spatial analytics (640x640)
                             resized = self._letterbox_resize(img, self.target_size)
                             
                             # Update shared buffer (store both)
-                            with self.locks[cid]:
-                                self.frames[cid] = resized  # For visualization
-                                self.original_frames[cid] = img  # For model
+                            if cid in self.locks: # Check if still valid
+                                with self.locks[cid]:
+                                    self.frames[cid] = resized
+                                    self.original_frames[cid] = img
                                 
                     except Exception as decode_err:
+                        # print(f"⚠️ Decode Error: {decode_err}", flush=True)
                         continue
                         
             except Exception as e:
-                print(f"❌ Connection Error {cid[:8]}: {e}. Retrying in 5s...")
-                time.sleep(5)
+                # Only log if still intended to run
+                if self.running and cid in self.camera_urls:
+                    print(f"❌ Connection Error {cid[:8]}: {e}. Retrying in 5s...", flush=True)
+                    time.sleep(5)
             finally:
                 if container:
                     try:
@@ -135,29 +179,36 @@ class ThreadedRTSPReader:
                     except:
                         pass
                 
-            if self.running:
+            if self.running and cid in self.camera_urls:
                 time.sleep(1)
+        print(f"👋 Stream Thread Exited: {cid[:8]}", flush=True)
     
     def get_frames(self):
         """Get all available frames as a batch.
         Returns: (resized_frames, original_frames, camera_ids)
         """
-        batch_frames = []      # Resized for visualization
-        batch_originals = []   # Original for model
+        batch_frames = []
+        batch_originals = []
         batch_ids = []
         
-        for cid in self.camera_urls.keys():
+        # Iterate over a copy of keys to avoid runtime error if dict changes size
+        for cid in list(self.camera_urls.keys()):
             frame = None
             original = None
-            if self.frames[cid] is not None:
-                with self.locks[cid]:
-                    frame = self.frames[cid].copy()
-                    original = self.original_frames[cid].copy() if self.original_frames[cid] is not None else None
             
-            if frame is not None and original is not None:
-                batch_frames.append(frame)
-                batch_originals.append(original)
-                batch_ids.append(cid)
+            # Safe access
+            try:
+                if cid in self.frames and self.frames[cid] is not None:
+                    with self.locks[cid]:
+                        frame = self.frames[cid].copy()
+                        original = self.original_frames[cid].copy() if self.original_frames[cid] is not None else None
+                
+                if frame is not None and original is not None:
+                    batch_frames.append(frame)
+                    batch_originals.append(original)
+                    batch_ids.append(cid)
+            except KeyError:
+                continue # Camera might have been removed mid-loop
         
         return batch_frames, batch_originals, batch_ids
     
@@ -194,13 +245,10 @@ async def run():
         face_model.load()
         print("DEBUG: Face Model Loaded.")
         
-        # 3.5 Vehicle Model (Wraps LPR)
-        print("DEBUG: Loading PP-Vehicle Model...")
-        pp_vehicle_weights = config.PPHUMAN_DET_MODEL_DIR  # RT-DETR shared model
-        vehicle_model = PPVehicleModel(model_dir=pp_vehicle_weights, lpr_model=lpr_model)
-        vehicle_model.load()
-        print("DEBUG: PP-Vehicle Model Loaded.")
-        # vehicle_model = None
+        # 3.5 Vehicle Model (Unified with PP-Human)
+        # We use the same RT-DETR session for both humans and vehicles
+        # to save VRAM and avoid conflicting GPU contexts.
+        vehicle_model = None # Handled inside SecurityProcessor using yolo_model results
 
     except Exception as e:
         print(f"❌ Model Load Failed: {e}")
@@ -214,8 +262,8 @@ async def run():
         db=db, 
         yolo_model=pp_human_model, 
         face_model=face_model, 
-        vehicle_model=None, # Vehicle Model is broken on this HW
-        lpr_model=lpr_model, # Pass ONNX LPR model
+        vehicle_model=vehicle_model,  # PP-Vehicle enabled for full LPR pipeline
+        lpr_model=lpr_model,  # ONNX LPR model
         face_cache=face_cache,
         loop=loop
     )
@@ -337,17 +385,83 @@ async def run():
     loop = asyncio.get_event_loop()
     
     # --- MAIN LOOP ---
+    last_camera_update = time.time()
+    
     try:
         frame_cnt = 0
         while True:
+            # --- Dynamic Camera Update (Hot Reload) ---
+            if time.time() - last_camera_update > 10:
+                last_camera_update = time.time()
+                try:
+                    # Run DB fetch in executor to avoid blocking loop
+                    def _fetch_cams():
+                        with db.conn.cursor() as cur:
+                            cur.execute("SELECT id, rtsp_url FROM cameras WHERE is_active = true")
+                            return cur.fetchall()
+                    
+                    rows = await loop.run_in_executor(None, _fetch_cams)
+                    
+                    new_active_cameras = {}
+                    replacements = {
+                        '{USER}': os.getenv('HIK_USER', ''),
+                        '{PASS}': os.getenv('HIK_PASS', ''),
+                        '{IP}': os.getenv('HIK_IP', ''),
+                        '{PORT_RTSP}': os.getenv('PORT_RTSP', '554')
+                    }
+                    
+                    for row in rows:
+                        # Sharding Logic
+                        if config.TOTAL_INSTANCES > 1:
+                            try:
+                                cam_int_val = int(row[0].replace('-', ''), 16)
+                                if cam_int_val % config.TOTAL_INSTANCES != config.INSTANCE_ID:
+                                    continue
+                            except: pass
+                            
+                        raw_url = row[1]
+                        for placeholder, val in replacements.items():
+                            if val and placeholder in raw_url:
+                                raw_url = raw_url.replace(placeholder, val)
+                        
+                        if 'placeholder' in raw_url.lower(): continue
+                        new_active_cameras[row[0]] = raw_url
+                    
+                    # Update Reader
+                    if rtsp_reader:
+                        rtsp_reader.update(new_active_cameras)
+                    
+                    # Update Configs for new cameras
+                    for cid in new_active_cameras.keys():
+                        if cid not in camera_configs:
+                            try:
+                                cfg = await loop.run_in_executor(None, lambda: db.get_camera_config_from_db(cid))
+                                if cfg:
+                                    camera_configs[cid] = cfg
+                                    print(f"✅ Loaded NEW config for {cid[:8]}...", flush=True)
+                            except Exception as e:
+                                print(f"❌ Config load error: {e}", flush=True)
+
+                except Exception as e:
+                    print(f"⚠️ Hot Reload Error: {e}", flush=True)
+
             if rtsp_reader is not None:
                 try:
                     # Get frames from threaded readers
+                    # 2. Grab latest frames
                     batch_frames, batch_originals, batch_ids = rtsp_reader.get_frames()
                     
+                    if frame_cnt % 20 == 0:
+                         print(f"📦 Heartbeat: Loop active. Batch size: {len(batch_frames)}", flush=True)
+
                     if not batch_frames:
-                        await asyncio.sleep(0.05)
+                        if frame_cnt % 50 == 0:
+                             print("💤 Idle (No frames from any camera)", flush=True)
+                        time.sleep(0.01)
                         continue
+                        
+                    if frame_cnt % 10 == 0:
+                         print(f"📦 Processing batch of {len(batch_frames)} frames", flush=True)
                     
                     # Keep frames as lists (different resolutions)
                     # cpu_batch = np.stack(batch_frames, axis=0) - Not needed
@@ -355,6 +469,10 @@ async def run():
                     
                     # Get configs for each camera
                     batch_configs = [camera_configs.get(cid, {}) for cid in batch_ids]
+                    
+                    # DEBUG: Print features for first cam
+                    if batch_configs and frame_cnt % 50 == 0:
+                        print(f"⚙️ Features for {batch_ids[0][:8]}: {batch_configs[0].get('features', [])}", flush=True)
                     
                     frame_cnt += 1
                     
@@ -385,10 +503,22 @@ async def run():
                         if batch_meta and len(batch_meta) == len(batch_ids):
                             print(f"📢 Publishing batch of {len(batch_meta)} items", flush=True)
                             for cid, meta in zip(batch_ids, batch_meta):
+                                # DEBUG ATTRIBUTES
+                                if "persons" in meta and meta["persons"]:
+                                    for p in meta["persons"]:
+                                        if "attributes" in p and p["attributes"]:
+                                            print(f"👤 Person Attr: {p['attributes']}", flush=True)
+                                if "vehicles" in meta and meta["vehicles"]:
+                                    for v in meta["vehicles"]:
+                                        if "attributes" in v and v["attributes"]:
+                                            print(f"🚗 Vehicle Attr: {v['attributes']}", flush=True)
+                                
                                 try:
                                     subject = f"camera.debug.{cid}"
                                     # print(f"📤 Publishing to {subject}", flush=True)
                                     payload = json.dumps(meta).encode()
+                                    if frame_cnt % 50 == 0:
+                                        print(f"🐛 DEBUG META PAYLOAD ({cid[:8]}): {json.dumps(meta)[:200]}...", flush=True)
                                     await nc.publish(subject, payload)
                                 except Exception as e:
                                     print(f"⚠️ NATS Publish Error: {e}", flush=True)
@@ -424,4 +554,12 @@ if __name__ == '__main__':
         uvloop.install()
     except:
         pass
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    except Exception as e:
+        import traceback
+        with open("/app/crash.log", "w") as f:
+            f.write(f"CRITICAL CRASH: {e}\n")
+            traceback.print_exc(file=f)
+        print("❌ CRITICAL FAILURE WRITTEN TO /app/crash.log")
+        time.sleep(10) # Wait to allow log capture

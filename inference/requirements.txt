@@ -1,9 +1,15 @@
 nats-py==2.12.0
 # ultralytics removed==8.3.240
-opencv-python-headless
+# opencv-python-headless  <-- Managed by Dockerfile/Container Base
+
+# PaddlePaddle Update (User Request: 3.2.2)
+# CAUTION: Forcing upgrade on NVIDIA NGC container
+paddlepaddle-gpu>=3.2.2
 
 # insightface==0.7.3
-onnxruntime-gpu==1.16.3
+# ONNX Runtime GPU - MUST match CUDA 12.6 + cuDNN 9.x from Docker image
+# Version 1.19+ is required for CUDA 12.x compatibility
+onnxruntime-gpu>=1.20.0
 psycopg2-binary==2.9.11
 supervision==0.18.0
 redis==5.0.1

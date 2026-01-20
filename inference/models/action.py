@@ -33,7 +33,7 @@ class ActionModel:
             config_paddle = paddle.inference.Config(model_file, params_file)
             if config.USE_GPU:
                 config_paddle.enable_use_gpu(500, 0)
-                config_paddle.switch_ir_optim(True)
+                config_paddle.switch_ir_optim(False) # CRITICAL: Disable IR optim to avoid RTX 50xx crash
                 config_paddle.enable_memory_optim()
             else:
                 config_paddle.disable_gpu()

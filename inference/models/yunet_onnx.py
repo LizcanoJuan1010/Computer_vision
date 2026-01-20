@@ -12,18 +12,41 @@ class YuNetONNX:
         self.nms_threshold = nms_threshold
         self.top_k = top_k
         
-        # Initialize ONNX Runtime
-        # Initialize ONNX Runtime with robust fallback
-        providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        # ONNX Optimization: Create optimized session options
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        sess_options.enable_mem_pattern = False
+        sess_options.enable_cpu_mem_arena = True
+        sess_options.intra_op_num_threads = 2  # Reduce CPU usage
+        sess_options.inter_op_num_threads = 1  # Reduce CPU usage
+        
+        # Provider configuration for optimal GPU usage
+        providers = [
+            ('CUDAExecutionProvider', {
+                'device_id': 0,
+                'arena_extend_strategy': 'kNextPowerOfTwo',
+                'cudnn_conv_algo_search': 'HEURISTIC',
+            }),
+            'CPUExecutionProvider'
+        ]
+        
         try:
-            self.session = ort.InferenceSession(model_path, providers=providers)
+            self.session = ort.InferenceSession(
+                model_path, 
+                sess_options=sess_options,
+                providers=providers
+            )
             active_providers = self.session.get_providers()
             print(f"✅ YuNet ONNX loaded. Providers: {active_providers}")
         except Exception as e:
             print(f"⚠️ Failed to load YuNet with CUDA: {e}")
             print("🔄 Falling back to CPUExecutionProvider...")
             try:
-                self.session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
+                self.session = ort.InferenceSession(
+                    model_path, 
+                    sess_options=sess_options,
+                    providers=['CPUExecutionProvider']
+                )
                 print("✅ YuNet ONNX loaded on CPU (Fallback).")
             except Exception as e2:
                 print(f"❌ Failed to load YuNet on CPU: {e2}")
@@ -97,19 +120,31 @@ class YuNetONNX:
             print(f"YuNet ONNX Inference Error: {e}")
             return 1, None
         
-        # outputs usually:
-        # [0]: loc  [1, N, 14]  (cx, cy, w, h, 5 landmarks (x,y))
-        # [1]: conf [1, N, 2]   (background, face)
-        # [2]: iou  [1, N, 1]   (iou score)
-        
+        # Debug Output Shapes
+        for i, o in enumerate(outputs):
+            print(f"📦 YuNet Output {i} ({self.output_names[i]}): shape={o.shape}", flush=True)
+
         loc, conf, iou = None, None, None
-        for o in outputs:
-            if o.shape[-1] == 14: loc = o
-            elif o.shape[-1] == 2: conf = o
-            elif o.shape[-1] == 1: iou = o
-            
+        
+        # Robust Mapping by Name
+        for name, output in zip(self.output_names, outputs):
+            if "loc" in name or "box" in name: 
+                loc = output
+            elif "conf" in name or "cls" in name or "score" in name: 
+                conf = output
+            elif "iou" in name: 
+                iou = output
+        
+        # Fallback to shape-based if names fail (or for backward compatibility)
         if loc is None or conf is None:
-            print("❌ YuNet Output shapes mismatch expectations.")
+            print("⚠️ YuNet: Name mapping failed. Trying shape-based fallback...")
+            for o in outputs:
+                if o.shape[-1] == 14: loc = o
+                elif o.shape[-1] == 2: conf = o
+                elif o.shape[-1] == 1: iou = o
+
+        if loc is None or conf is None or iou is None:
+            print(f"❌ YuNet Output Missing. Loc:{loc is not None} Conf:{conf is not None} IoU:{iou is not None}. Shapes: {[o.shape for o in outputs]}")
             return 0, None
 
         # 4. Decode

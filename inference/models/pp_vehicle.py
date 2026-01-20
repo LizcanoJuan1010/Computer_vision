@@ -5,11 +5,13 @@ Uses same RT-DETR model as PP-Human, filtered for vehicle classes
 import os
 import cv2
 import numpy as np
-import paddle
+# Note: paddle import removed - not needed for ONNX inference
 
 from ..config import config
-from .lpr import LPRModel
-from .detection import RTDETRModel # Import ONNX backend
+import time
+# Note: lpr_model is passed as instance, not imported here
+from .detection import RTDETRModel  # Import ONNX backend
+from .vehicle_attr_onnx import VehicleAttributeModelONNX
 
 # COCO class IDs for vehicles
 VEHICLE_CLASSES = {
@@ -29,28 +31,34 @@ class PPVehicleResult:
         self.conf = []       # [score, ...]
         self.plates = {}     # {track_id/index: plate_text}
         self.vehicle_types = {} # {track_id/index: vehicle_type}
+        self.attributes = {}    # {track_id/index: {color, type}}
 
 
 class PPVehicleModel:
     """
-    Vehicle Detection using RT-DETR (ONNX) + LPR
+    Vehicle Detection using RT-DETR (ONNX) + LPR + Attributes
     """
     
     def __init__(self, model_dir=None, lpr_model=None):
         # Default to ONNX path
-        self.model_path = "/app/weights/human_det/rtdetr_r18.onnx"
+        self.model_path = model_dir or config.PPHUMAN_DET_MODEL_DIR
         self.rt_detr = RTDETRModel(self.model_path)
         self.lpr_model = lpr_model
+        self.attr_model = VehicleAttributeModelONNX(config.PPVEHICLE_ATTR_ONNX)
+        
+        self.conf_threshold = 0.4
         
         self.conf_threshold = 0.4
         self._next_track_id = 10000  # Start high
         self._track_history = {}
+        self.attr_cache = {}    # track_id -> {ts, data}
         
     def load(self):
         """Load RT-DETR ONNX model"""
         print(f"🚗 Loading PP-Vehicle (ONNX) from {self.model_path}...", flush=True)
         try:
             self.rt_detr.load()
+            if self.attr_model: self.attr_model.load()
             print(f"✅ PP-Vehicle (ONNX) Loaded.", flush=True)
         except Exception as e:
             print(f"❌ Failed to load PP-Vehicle (ONNX): {e}", flush=True)
@@ -92,8 +100,8 @@ class PPVehicleModel:
                         result.cls.append(cls_id)
                         result.conf.append(float(score))
                         result.vehicle_types[vehicle_idx] = VEHICLE_CLASSES[cls_id]
-                        
                         # 3. Run LPR on vehicle crop
+                        # Note: LPR model handles RGB to BGR conversion internally
                         if self.lpr_model:
                             x1i, y1i, x2i, y2i = map(int, [x1, y1, x2, y2])
                             h, w = frame.shape[:2]
@@ -102,13 +110,29 @@ class PPVehicleModel:
                             y1i = max(0, min(y1i, h))
                             y2i = max(0, min(y2i, h))
                             
-                            if (x2i - x1i) > 20 and (y2i - y1i) > 20: # Min crop 20x20
+                            if (x2i - x1i) > 50 and (y2i - y1i) > 50:  # Min 50px for better OCR
                                 crop = frame[y1i:y2i, x1i:x2i]
                                 lpr_result = self.lpr_model.predict(crop)
                                 if lpr_result.label:
-                                    # print(f"🚗 Found Plate: {lpr_result.label}", flush=True)
+                                    print(f"📍 PP-Vehicle Plate: {lpr_result.label}", flush=True)
                                     result.plates[vehicle_idx] = lpr_result.label
                                     
+                                    result.plates[vehicle_idx] = lpr_result.label
+                                    
+                        # 4. Vehicle Attributes
+                        if self.attr_model:
+                             current_time = time.time()
+                             if track_id in self.attr_cache and (current_time - self.attr_cache[track_id]['ts']) < 2.0:
+                                 result.attributes[vehicle_idx] = self.attr_cache[track_id]['data']
+                             else:
+                                 # Logic: only run on large enough crops or if desired
+                                 crop_attr = frame[max(0, y1):min(h, y2), max(0, x1):min(w, x2)]
+                                 if crop_attr.size > 0:
+                                     attrs = self.attr_model.predict(frame, [[x1,y1,x2,y2]]) # Batch of 1
+                                     if attrs:
+                                         result.attributes[vehicle_idx] = attrs[0]
+                                         self.attr_cache[track_id] = {'ts': current_time, 'data': attrs[0]}
+                                     
                         vehicle_idx += 1
                         
             except Exception as e:

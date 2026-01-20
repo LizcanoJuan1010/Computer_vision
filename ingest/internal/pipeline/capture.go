@@ -58,13 +58,13 @@ func CaptureWorker(cam config.CameraConfig, cfg *config.Config, out chan<- Frame
 
 	log.Printf("[%s] ✅ FPSManager initialized (Priority: %s, Target: %.1f FPS)", cam.Name, fpsManager.GetPriority(), fpsManager.GetTargetFPS())
 
-	// Configure RTSP Transport (tcp or udp) with extended options
+	// Configure RTSP Transport (tcp or udp)
 	transport := os.Getenv("RTSP_TRANSPORT")
 	if transport == "" {
 		transport = "tcp" // Default to TCP if not set
 	}
-	// Add analyzeduration and probesize to fix "Could not find codec parameters" error
-	ffmpegOpts := "rtsp_transport;" + transport + "|analyzeduration;50000000|probesize;50000000"
+	// Simplified options to reduce overhead/errors
+	ffmpegOpts := "rtsp_transport;" + transport
 	os.Setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", ffmpegOpts)
 	log.Printf("[%s] FFMPEG options: %s", cam.Name, ffmpegOpts)
 

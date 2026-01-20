@@ -22,14 +22,36 @@ class PoseModel:
             return
 
         try:
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-            self.session = ort.InferenceSession(self.model_path, providers=providers)
+            # ONNX Optimization: Create optimized session options
+            sess_options = ort.SessionOptions()
+            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+            sess_options.enable_mem_pattern = False
+            sess_options.enable_cpu_mem_arena = True
+            sess_options.intra_op_num_threads = 1  # Reduce CPU usage
+            sess_options.inter_op_num_threads = 1  # Reduce CPU usage
+            sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            
+            providers = [
+                ('CUDAExecutionProvider', {
+                    'device_id': 0,
+                    'arena_extend_strategy': 'kNextPowerOfTwo',
+                    'cudnn_conv_algo_search': 'HEURISTIC',
+                }),
+                'CPUExecutionProvider'
+            ]
+            
+            self.session = ort.InferenceSession(
+                self.model_path, 
+                sess_options=sess_options,
+                providers=providers
+            )
             
             self.input_name = self.session.get_inputs()[0].name
             for out in self.session.get_outputs():
                 self.output_names.append(out.name)
                 
-            print(f"✅ RTMPose Loaded! Input: {self.input_name}, Providers: {self.session.get_providers()}", flush=True)
+            active = self.session.get_providers()
+            print(f"✅ RTMPose Loaded! Input: {self.input_name}, Providers: {active}", flush=True)
         except Exception as e:
             print(f"❌ Failed to load RTMPose: {e}", flush=True)
 

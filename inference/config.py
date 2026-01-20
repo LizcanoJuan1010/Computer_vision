@@ -19,20 +19,33 @@ class Config:
     # ==========================================================================
     # MODEL PATHS - Updated for NGC Container + RT-DETR + PP-OCRv4
     # ==========================================================================
+    WEIGHTS_DIR = "/app/weights"
     
     # PP-Human (RT-DETR Detection)
     PPHUMAN_CONFIG_PATH = "inference/config/pphuman.yaml"
     # RT-DETR exported model (downloaded & exported in Dockerfile)
     # Note: export_model puts files in a subdirectory named after the config
-    PPHUMAN_DET_MODEL_DIR = "/app/weights/human_det/rtdetr_r18.onnx"
+    PPHUMAN_DET_MODEL_DIR = os.path.join(WEIGHTS_DIR, "human_det", "rtdetr_r18_v2_opset16.onnx")
     # Fallback if export failed
     PPHUMAN_DET_MODEL_DIR_ALT = "/app/weights/human_det"
     
-    # PP-Human Attributes (PPLCNet)
-    PPHUMAN_ATTR_MODEL_DIR = "/app/weights/attributes/PPLCNet_x1_0_person_attribute_945_infer"
+    # PP-Human Attributes (PPLCNet) - ONNX
+    PPHUMAN_ATTR_ONNX = "/app/weights/attributes/human_attr.onnx"
     
-    # RTMPose for Skeleton/Pose (downloaded in Dockerfile)
-    PPHUMAN_POSE_MODEL_DIR = "/app/weights/pose"
+    # RTMPose for Skeleton/Pose
+    PPHUMAN_POSE_MODEL_DIR = "/app/weights/pose/end2end.onnx"
+    
+    # Action Recognition (ST-GCN) - ONNX
+    PPHUMAN_ACTION_ONNX = "/app/weights/action/stgcn.onnx"
+    
+    # Person ReID
+    PPHUMAN_REID_ONNX = "/app/weights/reid/reid.onnx"
+    
+    # Vehicle Attributes
+    PPVEHICLE_ATTR_ONNX = "/app/weights/vehicle_attr/vehicle_attr.onnx"
+    
+    # OCR Classification (Orientation)
+    OCR_CLS_MODEL_PATH = "/app/weights/ocr/cls/cls.onnx"
     
     # Face Detection (YuNet - downloaded in Dockerfile)
     FACE_DET_MODEL_PATH = os.getenv(
@@ -66,8 +79,15 @@ class Config:
     TOTAL_INSTANCES = int(os.getenv("TOTAL_INSTANCES", "1"))
 
     # Optimization
-    USE_TENSORRT = os.getenv("USE_TENSORRT", "false").lower() == "true"
+    USE_GPU = os.getenv("USE_GPU", "true").lower() == "true"
+    USE_TENSORRT = False # FORCE DISABLED due to SM 120 Error
+    # USE_TENSORRT = os.getenv("USE_TENSORRT", "false").lower() == "true"
     TENSORRT_PRECISION = os.getenv("TENSORRT_PRECISION", "fp16") # fp16, fp32, int8 
+
+    # Analysis Features
+    ENABLE_ATTRIBUTES = True # Optimized with Cache
+    ENABLE_LPR = True # Optimized with Cache
+    ENABLE_FACE_REC = True
 
     # Defaults
     DEFAULT_DET_CONFIDENCE = 0.3

@@ -114,12 +114,19 @@ class Database:
 
                 try:
                     if type_ == "stats":
-                        self._save_stats_sync(*data)
+                        # We need a dedicated connection for the worker to be thread-safe
+                        if not hasattr(self, '_worker_conn') or self._worker_conn is None:
+                             self._worker_conn = psycopg2.connect(config.DB_CONN_STR)
+                        self._save_stats_sync(*data, conn=self._worker_conn)
                     elif type_ == "event":
-                        self._save_event_sync(*data)
+                        if not hasattr(self, '_worker_conn') or self._worker_conn is None:
+                             self._worker_conn = psycopg2.connect(config.DB_CONN_STR)
+                        self._save_event_sync(*data, conn=self._worker_conn)
                 except Exception as e:
                     print(f"DB Worker Error ({type_}): {e}")
-                    self.conn.rollback()
+                    if hasattr(self, '_worker_conn') and self._worker_conn:
+                        self._worker_conn.rollback()
+                        self._worker_conn = None # Force reconnect
                 finally:
                     self.write_queue.task_done()
 
@@ -131,21 +138,25 @@ class Database:
     def save_stats(self, camera_id, in_count, out_count):
         self.write_queue.put(("stats", (camera_id, in_count, out_count)))
 
-    def _save_stats_sync(self, camera_name, in_count, out_count):
+    def save_event(self, camera_id, event_type, track_id, confidence=1.0, bbox=None, severity="MEDIUM"):
+        self.write_queue.put(("event", (camera_id, event_type, track_id, confidence, bbox, severity)))
+
+    def _save_stats_sync(self, camera_name, in_count, out_count, conn=None):
         """
         Save camera stats. Now uses UUID foreign key to cameras.
         """
+        active_conn = conn if conn else self.conn
         camera_uuid = self.get_camera_uuid(camera_name)
         if not camera_uuid:
             print(f"⚠️  Could not resolve UUID for camera: {camera_name}")
             return
 
-        with self.conn.cursor() as cur:
+        with active_conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO camera_stats (camera_id, in_count, out_count)
                 VALUES (%s, %s, %s)
             """, (camera_uuid, in_count, out_count))
-        self.conn.commit()
+        active_conn.commit()
 
     def get_camera_uuid(self, camera_name):
         """
@@ -156,14 +167,29 @@ class Database:
             return self.camera_uuid_cache[camera_name]
 
         try:
+            # Check if camera_name is already a UUID string
+            import uuid
+            try:
+                # If it's a valid UUID string, we can use it to find the camera by ID
+                uuid_obj = uuid.UUID(camera_name)
+                with self.conn.cursor() as cur:
+                    cur.execute("SELECT id FROM cameras WHERE id = %s", (str(uuid_obj),))
+                    res = cur.fetchone()
+                    if res:
+                        self.camera_uuid_cache[camera_name] = res[0]
+                        return res[0]
+            except (ValueError, TypeError):
+                pass
+
             with self.conn.cursor() as cur:
+                # Search by custom name
                 cur.execute("SELECT id FROM cameras WHERE name = %s", (camera_name,))
                 res = cur.fetchone()
                 if res:
                     self.camera_uuid_cache[camera_name] = res[0]
                     return res[0]
 
-                # Camera doesn't exist, create it
+                # Camera doesn't exist, create it with camera_name as name
                 cur.execute("""
                     INSERT INTO cameras (name, rtsp_url)
                     VALUES (%s, 'rtsp://placeholder')
@@ -173,7 +199,7 @@ class Database:
             
             self.conn.commit()
             self.camera_uuid_cache[camera_name] = new_id
-            print(f"✅ Created new camera with UUID: {camera_name} -> {new_id}")
+            print(f"✅ Resolved camera: {camera_name} -> {new_id}")
             return new_id
         except Exception as e:
             print(f"Error resolving camera UUID: {e}")
@@ -262,7 +288,7 @@ class Database:
 
             # Fallback/Default features if empty (Legacy support)
             if not config["features"]:
-                config["features"] = ["face", "intrusion"]
+                config["features"] = ["face", "intrusion", "lpr"]
                 
             return config
 
@@ -271,20 +297,23 @@ class Database:
             self.conn.rollback()
             return None
 
-    def _save_event_sync(self, camera_name, event_type, track_id, confidence, bbox, severity):
+    def _save_event_sync(self, camera_name, event_type, track_id, confidence, bbox, severity, conn=None):
         """
         Save event to database. Now uses UUID for camera_id and ENUM for severity/status.
         """
+        active_conn = conn if conn else self.conn
+        print(f"📡 DB Worker: Attempting to save {event_type} for {camera_name}...", flush=True)
         camera_uuid = self.get_camera_uuid(camera_name)
         if not camera_uuid:
+            print(f"⚠️ DB Worker: Could not resolve UUID for {camera_name}")
             return
 
         bbox_json = json.dumps(bbox) if bbox else None
 
         # Cast severity to enum explicitly
         try:
-            # print(f"DEBUG: Attempting to insert event for {camera_uuid}, Type={event_type}")
-            with self.conn.cursor() as cur:
+            print(f"💾 DB Worker: Inserting into table...", flush=True)
+            with active_conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO events (
                         camera_id, event_type, track_id, confidence, bbox, severity, status
@@ -292,11 +321,11 @@ class Database:
                     VALUES (%s, %s, %s, %s, %s, %s::event_severity_enum, %s::event_status_enum)
                 """, (camera_uuid, event_type, str(track_id), confidence, bbox_json, severity, 'PENDING'))
 
-            self.conn.commit()
-            # print(f"Event saved for {camera_name}: {event_type} (Track {track_id})")
+            active_conn.commit()
+            print(f"✅ DB Worker: Saved successfully (Event ID check omitted for speed)", flush=True)
         except Exception as e:
             print(f"CRITICAL DB ERROR saving event: {e}")
-            self.conn.rollback()
+            active_conn.rollback()
             raise e
 
     def close(self):
